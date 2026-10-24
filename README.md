@@ -1,22 +1,34 @@
 # Liquid Glass playground
 
-The real macOS 26 "Liquid Glass" material shaders, recovered from
-`QuartzCore.framework/.../default.metallib` (`glass_background_lpf` +
-`glass_foreground_lpf`), ported to GLSL ES 3.00 and running in WebGL2.
+A WebGL2 take on the macOS 26 Liquid Glass material, over Apple's own wallpapers.
 
-- The shape follows your cursor with eased motion ("Follow speed" slider)
-- Analytic SDF in two modes — squircle (exponent/aspect/size) or rounded rect
-  (width/height/corner radius) — with band-local refraction, per-channel
-  chromatic aberration, a real separable gaussian-blur pass on the backdrop
-  (amount + radius sliders), directional rim highlight + counter light, and a
-  soft drop shadow
-- "macOS" button applies the values recovered from QuartzCore
-  (20 pt refraction band, curvature=1, highlight angle π/2 / spread π /
-  amount 0.5, shadow r=10 off={0,-10}); "Reset" restores playground defaults
-- "Wallpaper" cycles Apple defaults (Big Sur → Golden Gate), courtesy of
-  [512pixels' archive](https://512pixels.net/projects/default-mac-wallpapers-in-5k/)
-- "Copy JSON" exports the current params; H hides the panel
+The shape is an analytic rounded rect (or squircle, for continuous corners).
+The edge math comes from QuartzCore's `glass_background_lpf` /
+`glass_foreground_lpf` in `default.metallib`:
 
-Static site — open `index.html` or serve the directory. Built by Devin
-from dyld-cache RE; see the QuartzCore_shaders.ll provenance notes in the
-original research session.
+- refraction: the backdrop is sampled outward along the SDF gradient by the
+  circular-cap `edgeOffset` curve (full amount at the rim, zero at depth
+  "height"), with per-channel dispersion
+- frost: a real separable gaussian on the backdrop, mixed in by "Amount"
+- highlight: a directional cone (angle / spread / amount) and the opposite
+  fill light
+- edge spectrum: the foreground pass's 7-tap walk along the normal
+  (R from the outward taps, B from the inward taps)
+- drop shadow
+
+It's not a byte-for-byte port. Apple renders from an SDF texture with mip-biased
+blur and color matrices, and this uses an analytic shape with a gaussian instead.
+
+All lengths are in points. "macOS" applies the recovered values: displacement
+height 20, curvature 1, refraction 30, highlight angle 90° / spread 180° /
+amount 0.5, fill 0.5, shadow radius 10 at {0, -10}. "Reset" goes back to the
+playground defaults.
+
+Turn "Follow cursor" off to drag the glass around, or click to drop it somewhere.
+H hides the panel, and clicking the title collapses it. "Copy JSON" exports
+the current params.
+
+Wallpapers (Big Sur through Golden Gate) are from
+[512pixels' archive](https://512pixels.net/projects/default-mac-wallpapers-in-5k/).
+
+Static site: serve the directory, or open https://spacedouut.github.io/liquid-glass/.
