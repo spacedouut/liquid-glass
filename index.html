@@ -3,60 +3,45 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Liquid Glass playground</title>
+<title>Liquid Glass</title>
 <style>
   :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin:0; font:13px/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif;
-         background:#000; color:#eee; overflow:hidden; }
-  canvas { display:block; width:100vw; height:100vh; cursor:grab; }
-  canvas.dragging { cursor:grabbing; }
-  #ui {
-    position:fixed; top:12px; right:12px; width:300px; max-height:calc(100vh - 24px);
-    overflow-y:auto; background:rgba(20,20,22,.72); backdrop-filter:blur(20px) saturate(1.6);
-    -webkit-backdrop-filter:blur(20px) saturate(1.6);
-    border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:12px 14px;
-    scrollbar-width:thin;
+  html, body { margin:0; height:100%; background:#05060a; overflow:hidden;
+               font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  canvas { display:block; width:100vw; height:100vh; cursor:none; }
+  #panel {
+    position:fixed; top:12px; right:12px; width:252px; max-height:calc(100vh - 24px);
+    overflow-y:auto; box-sizing:border-box; padding:12px 14px 14px;
+    background:rgba(14,16,24,.72); color:#dfe3ee;
+    border:1px solid rgba(255,255,255,.12); border-radius:14px;
+    backdrop-filter:blur(14px) saturate(1.5); -webkit-backdrop-filter:blur(14px) saturate(1.5);
+    font-size:12px; user-select:none; cursor:default;
   }
-  #ui h1 { font-size:13px; font-weight:600; margin:0 0 8px; letter-spacing:.2px; }
-  .row { display:flex; align-items:center; gap:8px; margin:5px 0; }
-  .row label { flex:0 0 118px; color:#bbb; font-size:12px; }
-  .row input[type=range] { flex:1; min-width:0; accent-color:#0af; }
-  .row .val { flex:0 0 42px; text-align:right; font-variant-numeric:tabular-nums; color:#888; font-size:11px; }
-  .btns { display:flex; gap:6px; margin:8px 0 2px; }
-  button {
-    flex:1; background:rgba(255,255,255,.1); color:#eee; border:1px solid rgba(255,255,255,.14);
-    border-radius:8px; padding:6px 8px; font:inherit; font-size:12px; cursor:pointer;
-  }
-  button:hover { background:rgba(255,255,255,.18); }
-  button.primary { background:#0af; border-color:#0af; color:#00131f; font-weight:600; }
-  .sep { border-top:1px solid rgba(255,255,255,.1); margin:10px 0 6px; }
-  .note { color:#777; font-size:11px; margin-top:8px; }
-  #wallname { color:#0af; }
+  #panel.collapsed .body { display:none; }
+  #panel header { display:flex; justify-content:space-between; align-items:center;
+                  font-weight:600; letter-spacing:.02em; cursor:pointer; }
+  #panel header span.hint { font-weight:400; opacity:.5; font-size:11px; }
+  .group { margin-top:12px; font-size:10px; text-transform:uppercase;
+           letter-spacing:.1em; opacity:.45; }
+  .row { margin-top:8px; }
+  .row .top { display:flex; justify-content:space-between; margin-bottom:3px; }
+  .row .val { opacity:.6; font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; margin:0; accent-color:#8fb4ff; }
+  input[type=color] { width:100%; height:22px; padding:0; border:none; background:none; }
+  .btns { display:flex; gap:8px; margin-top:14px; }
+  button { flex:1; padding:6px 0; border-radius:8px; cursor:pointer; font-size:12px;
+           color:#dfe3ee; background:rgba(255,255,255,.08);
+           border:1px solid rgba(255,255,255,.14); }
+  button:hover { background:rgba(255,255,255,.16); }
+  button.on { border-color:#8fb4ff; color:#8fb4ff; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="ui">
-  <h1>Liquid Glass</h1>
-  <div class="btns">
-    <button id="wall" title="cycle wallpaper">Wallpaper: <span id="wallname">…</span></button>
-  </div>
-  <div class="btns">
-    <button id="follow">Follow cursor: off</button>
-    <button id="fg">Edge glow: on</button>
-  </div>
-  <div class="sep"></div>
-  <div id="sliders"></div>
-  <div class="btns">
-    <button class="primary" id="reset">Reset to macOS defaults</button>
-  </div>
-  <div class="note">Drag the panel to move it. Shader is the real QuartzCore <code>glass_background/foreground_lpf</code>, recovered from <code>default.metallib</code>. Wallpapers © Apple via 512pixels.</div>
+<div id="panel">
+  <header id="ph">Liquid Glass <span class="hint">H to hide</span></header>
+  <div class="body" id="pb"></div>
 </div>
-<script>window.onerror=(m,s,l,c,e)=>{document.title='ERR: '+m;const d=document.createElement('pre');
-d.style.cssText='position:fixed;left:8px;top:8px;z-index:99;color:#f66;background:#000a;padding:8px;max-width:60ch;white-space:pre-wrap';
-d.textContent=m+'\n'+(e&&e.stack||'');document.body.appendChild(d);};</script>
-<script src="shaders.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
