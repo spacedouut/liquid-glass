@@ -5,41 +5,45 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Liquid Glass</title>
 <style>
-  :root { color-scheme: dark; }
-  html, body { margin:0; height:100%; background:#05060a; overflow:hidden;
+  :root { color-scheme: dark; --accent:#8fb4ff; }
+  html, body { margin:0; height:100%; background:#000; overflow:hidden;
                font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-  canvas { display:block; width:100vw; height:100vh; cursor:none; }
+  canvas { display:block; position:fixed; inset:0; width:100%; height:100%; touch-action:none; }
+  canvas.follow { cursor:none; }
+  canvas.drag { cursor:grab; }
+  canvas.dragging { cursor:grabbing; }
   #panel {
-    position:fixed; top:12px; right:12px; width:252px; max-height:calc(100vh - 24px);
+    position:fixed; top:12px; right:12px; width:256px; max-height:calc(100% - 24px);
     overflow-y:auto; box-sizing:border-box; padding:12px 14px 14px;
-    background:rgba(14,16,24,.72); color:#dfe3ee;
-    border:1px solid rgba(255,255,255,.12); border-radius:14px;
-    backdrop-filter:blur(14px) saturate(1.5); -webkit-backdrop-filter:blur(14px) saturate(1.5);
-    font-size:12px; user-select:none; cursor:default;
+    background:rgba(10,10,12,.78); color:#e4e6ec;
+    border:1px solid rgba(255,255,255,.1); border-radius:14px;
+    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    font-size:12px; user-select:none; scrollbar-width:thin;
   }
   #panel.collapsed .body { display:none; }
   #panel header { display:flex; justify-content:space-between; align-items:center;
-                  font-weight:600; letter-spacing:.02em; cursor:pointer; }
-  #panel header span.hint { font-weight:400; opacity:.5; font-size:11px; }
-  .group { margin-top:12px; font-size:10px; text-transform:uppercase;
-           letter-spacing:.1em; opacity:.45; }
+                  font-weight:600; cursor:pointer; }
+  #panel header span { font-weight:400; opacity:.45; font-size:11px; }
+  .group { margin-top:14px; font-size:10px; text-transform:uppercase; letter-spacing:.1em; opacity:.45; }
   .row { margin-top:8px; }
+  .row[hidden] { display:none; }
   .row .top { display:flex; justify-content:space-between; margin-bottom:3px; }
-  .row .val { opacity:.6; font-variant-numeric:tabular-nums; }
-  input[type=range] { width:100%; margin:0; accent-color:#8fb4ff; }
+  .row .val { opacity:.55; font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; margin:0; accent-color:var(--accent); }
   input[type=color] { width:100%; height:22px; padding:0; border:none; background:none; }
-  .btns { display:flex; gap:8px; margin-top:14px; }
-  button { flex:1; padding:6px 0; border-radius:8px; cursor:pointer; font-size:12px;
-           color:#dfe3ee; background:rgba(255,255,255,.08);
-           border:1px solid rgba(255,255,255,.14); }
-  button:hover { background:rgba(255,255,255,.16); }
-  button.on { border-color:#8fb4ff; color:#8fb4ff; }
+  .btns { display:flex; gap:6px; margin-top:8px; }
+  .group + .btns { margin-top:8px; }
+  button { flex:1; padding:6px 0; border-radius:8px; cursor:pointer; font:inherit; font-size:12px;
+           color:#e4e6ec; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.12); }
+  button:hover { background:rgba(255,255,255,.14); }
+  button.on { border-color:var(--accent); color:var(--accent); }
+  #wall { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="panel">
-  <header id="ph">Liquid Glass <span class="hint">H to hide</span></header>
+  <header id="ph">Liquid Glass <span>H hides</span></header>
   <div class="body" id="pb"></div>
 </div>
 <script src="app.js"></script>
