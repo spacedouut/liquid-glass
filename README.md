@@ -5,9 +5,11 @@ The real macOS 26 "Liquid Glass" material shaders, recovered from
 `glass_foreground_lpf`), ported to GLSL ES 3.00 and running in WebGL2.
 
 - The shape follows your cursor with eased motion ("Follow speed" slider)
-- Analytic squircle SDF (adjustable exponent, aspect, size) with band-local
-  refraction, per-channel chromatic aberration, mip-blurred backdrop, directional
-  rim highlight + counter light, and a soft drop shadow
+- Analytic SDF in two modes — squircle (exponent/aspect/size) or rounded rect
+  (width/height/corner radius) — with band-local refraction, per-channel
+  chromatic aberration, a real separable gaussian-blur pass on the backdrop
+  (amount + radius sliders), directional rim highlight + counter light, and a
+  soft drop shadow
 - "macOS" button applies the values recovered from QuartzCore
   (20 pt refraction band, curvature=1, highlight angle π/2 / spread π /
   amount 0.5, shadow r=10 off={0,-10}); "Reset" restores playground defaults

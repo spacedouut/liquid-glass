@@ -11,6 +11,38 @@ const vs = `#version 300 es
 layout(location=0) in vec2 aPos;
 void main(){ gl_Position = vec4(aPos,0.0,1.0); }`;
 
+const BLUR_FS = `#version 300 es
+precision highp float;
+out vec4 O;
+uniform sampler2D t;
+uniform vec2 uRes;   // source res (this pass render size)
+uniform vec2 uDir;   // (texelX,0) or (0,texelY) in uv
+uniform float uSigma;
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  float w0 = 1.0, sum = w0;
+  vec3 c = texture(t, uv).rgb * w0;
+  for (int i = 1; i <= 8; i++) {
+    float x = float(i) * uSigma;
+    float w = exp(-x*x / (2.0*uSigma*uSigma));
+    c += texture(t, uv + float(i)*uDir).rgb * w;
+    c += texture(t, uv - float(i)*uDir).rgb * w;
+    sum += 2.0*w;
+  }
+  O = vec4(c/sum, 1.0);
+}`;
+
+const COVER_FS = `#version 300 es
+precision highp float;
+out vec4 O;
+uniform sampler2D t;
+uniform vec2 uRes;
+uniform vec2 uUvScale, uUvOff;
+void main(){
+  vec2 p = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  O = texture(t, vec2(0.5) + vec2(p.x*uRes.y/uRes.x, -p.y)*uUvScale + uUvOff);
+}`;
+
 const fs = `#version 300 es
 precision highp float;
 out vec4 O;
@@ -41,14 +73,26 @@ uniform float uCurv;      // 0 = linear lens falloff, 1 = circular
 uniform vec2  uShadowOff;
 uniform float uShadowRad;
 uniform float uBlur;
+uniform float uShapeMode;  // 0 = squircle, 1 = rounded rect
+uniform vec3  uRect;       // halfW, halfH, corner radius (canvas-height units)
+uniform sampler2D uBgBlur;
 
 vec2 bgUV(vec2 p){
   return vec2(0.5) + vec2(p.x * uRes.y / uRes.x, -p.y) * uUvScale + uUvOff;
 }
 vec3 scene(vec2 p, float lod){ return textureLod(uBg, bgUV(p), lod).rgb; }
 vec3 scene(vec2 p){ return textureLod(uBg, bgUV(p), 0.0).rgb; }
+vec3 sceneBlur(vec2 p){
+  return mix(textureLod(uBg, bgUV(p), 0.0).rgb,
+             textureLod(uBgBlur, bgUV(p), 0.0).rgb, uBlur);
+}
 
 float sdf(vec2 q){
+  if (uShapeMode > 0.5) {
+    vec2 b = vec2(uRect.x, uRect.y), r = vec2(uRect.z);
+    vec2 w = abs(q) - b + r;
+    return length(max(w,0.0)) + min(max(w.x,w.y),0.0) - uRect.z;
+  }
   q.x /= uAspect;
   vec2 a = max(abs(q)/uSize, vec2(1e-5));
   float k = pow(pow(a.x,uExp)+pow(a.y,uExp), 1.0/uExp);
@@ -72,11 +116,10 @@ void main(){
   float prof = mix(s, sqrt(s*(2.0-s)), uCurv);
   float amt = uRefract * prof;
 
-  float lod = uBlur * uMaxLod * (0.35 + 0.65*inside);
   vec3 refr;
-  refr.r = scene(p - g*amt*(1.0-uCA), lod).r;
-  refr.g = scene(p - g*amt, lod).g;
-  refr.b = scene(p - g*amt*(1.0+uCA), lod).b;
+  refr.r = sceneBlur(p - g*amt*(1.0-uCA)).r;
+  refr.g = sceneBlur(p - g*amt).g;
+  refr.b = sceneBlur(p - g*amt*(1.0+uCA)).b;
 
   vec3 glass = refr * uBrighten;
   glass = mix(glass, glass*uTint, uTintAmt);
@@ -115,13 +158,43 @@ gl.bindBuffer(gl.ARRAY_BUFFER,buf);
 gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
 gl.enableVertexAttribArray(0);
 gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+function mkProg(fsrc){const p=gl.createProgram();
+  gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fsrc));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw gl.getProgramInfoLog(p);
+  return p;}
+const pCover=mkProg(COVER_FS), pBlur=mkProg(BLUR_FS);
+const fboTex=[gl.createTexture(),gl.createTexture()];
+const fbos=[gl.createFramebuffer(),gl.createFramebuffer()];
+let fboW=0,fboH=0;
+function ensureFBOs(){
+  const w=Math.max(1,canvas.width>>1),h=Math.max(1,canvas.height>>1);
+  if(w===fboW&&h===fboH)return;
+  fboW=w;fboH=h;
+  for(let i=0;i<2;i++){
+    gl.bindTexture(gl.TEXTURE_2D,fboTex[i]);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fbos[i]);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,fboTex[i],0);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+}
+const U2=(p,n)=>gl.getUniformLocation(p,n);
+const locB={res:U2(pBlur,'uRes'),dir:U2(pBlur,'uDir'),sig:U2(pBlur,'uSigma'),t:U2(pBlur,'t')};
+const locC={res:U2(pCover,'uRes'),uvS:U2(pCover,'uUvScale'),uvO:U2(pCover,'uUvOff'),t:U2(pCover,'t')};
+
 const U=n=>gl.getUniformLocation(prog,n);
 const loc={res:U('uRes'),time:U('uTime'),mouse:U('uMouse'),bg:U('uBg'),uvS:U('uUvScale'),
   uvO:U('uUvOff'),maxLod:U('uMaxLod'),size:U('uSize'),aspect:U('uAspect'),exp:U('uExp'),
   band:U('uBand'),refract:U('uRefract'),ca:U('uCA'),light:U('uLightAngle'),
   rimInt:U('uRimInt'),rimWidth:U('uRimWidth'),backLight:U('uBackLight'),
   brighten:U('uBrighten'),tintAmt:U('uTintAmt'),tint:U('uTint'),shadow:U('uShadow'),
-  spread:U('uSpread'),curv:U('uCurv'),shOff:U('uShadowOff'),shRad:U('uShadowRad'),blur:U('uBlur')};
+  spread:U('uSpread'),curv:U('uCurv'),shOff:U('uShadowOff'),shRad:U('uShadowRad'),blur:U('uBlur'),mode:U('uShapeMode'),rect:U('uRect'),bgB:U('uBgBlur')};
 
 // ---- wallpapers ---------------------------------------------------------
 const WALLS=[
@@ -155,7 +228,8 @@ const DEFAULTS={
   size:0.20,aspect:1.0,exp:4.0,band:0.12,refract:0.09,ca:0.06,
   light:135,rimInt:0.55,rimWidth:140,backLight:0.15,brighten:1.08,
   tintAmt:0.0,tint:'#9cc4ff',shadow:0.35,follow:0.14,blur:0.35,
-  spread:180,curv:1.0,shOffX:0.014,shOffY:-0.014,shRad:0.11
+  spread:180,curv:1.0,shOffX:0.014,shOffY:-0.014,shRad:0.11,
+  gauss:14,rectW:0.30,rectH:0.18,rectR:0.04,shapeMode:0
 };
 // Recovered QuartzCore values: height=20pt band, refraction≈30pt, curvature=1,
 // highlight angle=π/2 spread=π amount=0.5, shadow r=10 off={0,-10}.
@@ -177,7 +251,11 @@ const SCHEMA=[
   ['band',   'Lens band width',   0.02,0.35,0.005],
   ['ca',     'Chromatic aberration',0, 0.3, 0.005],
   ['curv',   'Edge curvature',    0,   1,   0.01],
-  ['blur',   'Frost blur',        0,   1,   0.01],
+  ['blur',   'Gaussian amount',    0,   1,   0.01],
+  ['gauss',  'Gaussian radius',  0,   60,  0.5],
+  ['rectW',  'Rect width',        0.05,0.9, 0.005],
+  ['rectH',  'Rect height',       0.05,0.9, 0.005],
+  ['rectR',  'Corner radius',     0,   0.45,0.005],
   ['Light'],
   ['light',  'Light angle (deg)', 0,   360, 1],
   ['rimInt', 'Rim intensity',     0,   1.5, 0.01],
@@ -231,7 +309,10 @@ const wall=document.createElement('button');
 const wallName=()=>WALLS[wallIdx].replace(/^\d+-/,'').replace(/-/g,' ');
 wall.textContent='Wallpaper: '+wallName();
 wall.onclick=()=>{wallIdx=(wallIdx+1)%WALLS.length;wall.textContent='Wallpaper: '+wallName();loadWall(wallIdx);};
-btns2.append(wall);body.appendChild(btns2);
+const shapeB=document.createElement('button');
+shapeB.textContent='Shape: squircle';
+shapeB.onclick=()=>{state.shapeMode=state.shapeMode?0:1;shapeB.textContent='Shape: '+(state.shapeMode?'rounded rect':'squircle');shapeB.classList.toggle('on',!!state.shapeMode);};
+btns2.append(wall,shapeB);body.appendChild(btns2);
 
 document.getElementById('ph').onclick=()=>document.getElementById('panel').classList.toggle('collapsed');
 addEventListener('keydown',e=>{if(e.key==='h'||e.key==='H'){const p=document.getElementById('panel');p.style.display=p.style.display==='none'?'':'none';}});
@@ -271,6 +352,32 @@ function frame(now){
   const k=1-Math.pow(1-state.follow,dt*60);
   mouse.x+=(target.x-mouse.x)*k;mouse.y+=(target.y-mouse.y)*k;
   const u=uvMap();
+  // ---- gaussian blur passes (half res) ----
+  ensureFBOs();
+  gl.useProgram(pCover);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbos[0]);
+  gl.viewport(0,0,fboW,fboH);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,bgTex);
+  gl.uniform1i(locC.t,0);
+  gl.uniform2f(locC.res,fboW,fboH);
+  gl.uniform2f(locC.uvS,u.sx,u.sy);gl.uniform2f(locC.uvO,u.ox,u.oy);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const sigmaPx = Math.max(state.gauss,0.001) * (fboH/canvas.height);
+  gl.useProgram(pBlur);
+  gl.uniform1i(locB.t,0);
+  gl.uniform2f(locB.res,fboW,fboH);
+  gl.uniform1f(locB.sig,Math.max(sigmaPx,0.5));
+  gl.uniform2f(locB.dir,1/fboW,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbos[1]);
+  gl.bindTexture(gl.TEXTURE_2D,fboTex[0]);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.uniform2f(locB.dir,0,1/fboH);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbos[0]);
+  gl.bindTexture(gl.TEXTURE_2D,fboTex[1]);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.useProgram(prog);
   gl.uniform2f(loc.res,canvas.width,canvas.height);
   gl.uniform1f(loc.time,(now-start)/1000);
   gl.uniform2f(loc.mouse,mouse.x,mouse.y);
@@ -289,6 +396,10 @@ function frame(now){
   gl.uniform1f(loc.spread,state.spread*Math.PI/180);gl.uniform1f(loc.curv,state.curv);
   gl.uniform2f(loc.shOff,state.shOffX,state.shOffY);gl.uniform1f(loc.shRad,state.shRad);
   gl.uniform1f(loc.blur,state.blur);
+  gl.uniform1f(loc.mode,state.shapeMode);
+  gl.uniform3f(loc.rect,state.rectW,state.rectH,state.rectR);
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,fboTex[0]);
+  gl.uniform1i(loc.bgB,1);
   gl.drawArrays(gl.TRIANGLES,0,3);
   requestAnimationFrame(frame);
 }
