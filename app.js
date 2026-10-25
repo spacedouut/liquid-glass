@@ -47,9 +47,9 @@ void main(){
   O = vec4(c / sum, 1.0);
 }`;
 
-// Half-res downsample for the QC backdrop pyramid: tent filter (4 corner taps
-// at +-1 src px + weighted center) instead of generateMipmap's 2x2 box, so
-// diagonal/high-contrast content doesn't alias into visible blocks.
+// Half-res downsample for the QC backdrop pyramid: 3x3 binomial kernel
+// ((1,2,1)^2 / 16) in source space — a real gaussian-ish prefilter instead of
+// generateMipmap's 2x2 box, so magnified mips read as blur, not a pixel grid.
 const DOWN_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
@@ -57,12 +57,12 @@ uniform vec2 uSrcRes;
 out vec4 O;
 void main(){
   vec2 h = 1.0 / uSrcRes, uv = gl_FragCoord.xy * 2.0 * h;
-  vec4 c = texture(uSrc, uv) * 4.0;
-  c += texture(uSrc, uv + vec2(-h.x, -h.y));
-  c += texture(uSrc, uv + vec2( h.x, -h.y));
-  c += texture(uSrc, uv + vec2(-h.x,  h.y));
-  c += texture(uSrc, uv + vec2( h.x,  h.y));
-  O = c / 8.0;
+  vec4 c = texture(uSrc, uv + vec2(-h.x, -h.y)) + texture(uSrc, uv + vec2(-h.x, h.y))
+         + texture(uSrc, uv + vec2( h.x, -h.y)) + texture(uSrc, uv + vec2( h.x, h.y))
+         + (texture(uSrc, uv + vec2(-h.x, 0.0)) + texture(uSrc, uv + vec2(h.x, 0.0))
+         +  texture(uSrc, uv + vec2(0.0, -h.y)) + texture(uSrc, uv + vec2(0.0, h.y))) * 2.0
+         + texture(uSrc, uv) * 4.0;
+  O = c / 16.0;
 }`;
 
 // Rounded rect in pt (negative inside); uExp 2 = circular corners, >2 = squircle.
@@ -413,12 +413,15 @@ function ensureRT(w, h){
 // storage), each level rendered with DOWN_FS rather than generateMipmap so
 // the pyramid is properly band-limited.
 const back = { t: tex(), f: gl.createFramebuffer(), w: 0, h: 0, levels: 1, dirty: true };
+// fp16 keeps the pyramid from banding on smooth gradients (8-bit mips read as
+// blocky when magnified); RGBA8 fallback where color-buffer-float is missing.
+const backFmt = gl.getExtension('EXT_color_buffer_float') ? gl.RGBA16F : gl.RGBA8;
 function ensureBack(W, H, cover){
   if (back.w !== W || back.h !== H) {
     back.w = W; back.h = H; back.dirty = true;
     back.levels = Math.floor(Math.log2(Math.max(W, H))) + 1;
     gl.bindTexture(gl.TEXTURE_2D, back.t);
-    gl.texStorage2D(gl.TEXTURE_2D, back.levels, gl.RGBA8, W, H);
+    gl.texStorage2D(gl.TEXTURE_2D, back.levels, backFmt, W, H);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   }
   if (!back.dirty) return;
