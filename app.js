@@ -210,7 +210,7 @@ uniform GlassForegroundUniforms uFG;
 uniform bool uFgOn;
 uniform float globalAlpha;
 uniform sampler2D srcTex;
-uniform float uMaxLod;
+uniform float uMaxLod, uFgBlur;
 uniform vec2  uRes, uCenter;
 uniform float uDpr;
 uniform float uShadow, uShRad;
@@ -352,15 +352,15 @@ vec4 glassForeground(vec2 uv0, vec2 q){
   vec2 base = uv0 + edgeOffset(d, uFG.rimBase1, uFG.rimEdge1, uFG.rimAmount1) * dirA;
   vec2 stp  = edgeOffset(d, uFG.rimBase2, uFG.rimEdge2, uFG.rimAmount2) * dirB;
   vec4 acc = vec4(0.0);
-  float k = 1.0;
+  float k = 1.0, fgLod = mipLod(uFgBlur);
   for (int i = 0; i < 3; i++) {
-    vec4 s = smp(base + k * stp, 0.0);
+    vec4 s = smp(base + k * stp, fgLod);
     vec2 rg = s.rg / max(s.a, EPS);
     acc.x += rg.x * k; acc.y += rg.y * (1.0 - k); acc.a += s.a; k -= 1.0 / 3.0;
   }
   k = 0.0;
   for (int i = 0; i < 4; i++) {
-    vec4 s = smp(base - k * stp, 0.0);
+    vec4 s = smp(base - k * stp, fgLod);
     vec2 gb = s.gb / max(s.a, EPS);
     acc.y += gb.x * (1.0 - k); acc.z += gb.y * k; acc.a += s.a; k += 1.0 / 3.0;
   }
@@ -519,7 +519,7 @@ const DEFAULTS = {
   bright: 1.04, tint: '#ffffff', tintAmt: 0,
   shadow: 0.22, shRad: 18, shOffX: 0, shOffY: -8,
   qc: false,
-  qAngle: 0, qAmount: 30, qHeight: 20, qAmount2: 15, qHeight2: 10, qMix: 0.5, qBlur: 4,
+  qAngle: 0, qAmount: 30, qHeight: 20, qAmount2: 15, qHeight2: 10, qMix: 0.5, qBlur: 4, qEdgeBlur: 1,
   qRimAmount: 8, qRimHeight: 3, qRimBlur: 1, qRimStrength: 6, qRimBright: 1.3, qSpec: 0.75,
   qSat: 1, qFaceBright: 1,
   qFgOn: true, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
@@ -537,7 +537,7 @@ const MACOS = {
 const state = Object.assign({}, DEFAULTS);
 // ?key=value overrides for any param (e.g. ?qc=1&follow=0) — handy for testing.
 for (const [k, v] of new URLSearchParams(location.search))
-  if (k in state) state[k] = v === 'true' || v === '1' ? true : v === 'false' || v === '0' ? false : isNaN(+v) ? v : +v;
+  if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : isNaN(+v) ? v : +v;
 const pos = { x: 0, y: 0 }, target = { x: 0, y: 0 };   // CSS px, y down
 
 const analytic = () => !state.qc, quartz = () => state.qc;
@@ -581,6 +581,7 @@ const SCHEMA = [
   ['qHeight2', 'Inner height', 1, 200, 0.5],
   ['qMix', 'Inner mix', 0, 1, 0.01],
   ['qBlur', 'Blur (mip)', 0, 64, 0.5],
+  ['qEdgeBlur', 'Blur at rim', 0, 1, 0.01],
   ['Rim', quartz],
   ['qRimAmount', 'Offset', 0, 60, 0.5],
   ['qRimHeight', 'Height', 0.5, 40, 0.5],
@@ -820,7 +821,16 @@ function drawQC(W, H, cover){
   f('uBG.mat2Amount', sat !== 1 || br !== 1 ? 1 : 0);
   m3('uBG.rimM', [rb, 0, 0, 0, rb, 0, 0, 0, rb]); f('uBG.rimBias', 0, 0, 0);
   m3('uBG.tintM', I); f('uBG.tintBias', 0, 0, 0); f('uBG.tintAmount', 0); f('uBG.tintAlpha', 0);
-  f('uBG.caLumaBias', 1); f('uBG.spec', 0.9, 0.45, 0.15); f('uBG.knots', 0, 1 / 3, 2 / 3, 1);
+  // The knot remap scales the blur lod by (caLumaBias - dot(sp, spec)) as the
+  // displaced sample (edgeOffset + d) runs out to the rim. Knots/spec aren't
+  // recovered; the old guess (knots over 1 pt, spec summing to 1.5) zeroed the
+  // lod across the whole refracted band so the rim read the full-res backdrop.
+  // Now the ramp spans the displacement and bottoms out at qEdgeBlur x center.
+  // The foreground pass's 7 taps (which paint the outer ~11 pt) get the same
+  // reduced blur instead of lod 0.
+  const ke = 1 - state.qEdgeBlur, ka = Math.max(state.qAmount, 1);
+  f('uFgBlur', state.qBlur * state.qEdgeBlur);
+  f('uBG.caLumaBias', 1); f('uBG.spec', ke * 0.6, ke * 0.3, ke * 0.1); f('uBG.knots', 0, ka / 3, ka * 2 / 3, ka);
   f('uBG.specScaleBias', state.qSpec, 0);
   f('uBG.fadeAmount', 0); f('uBG.fadeLo', -11); f('uBG.fadeHi', -3); f('uBG.fadeScale', 1);
   f('uBG.hdrClampMax', 0); f('uBG.premulClamp', 0); f('uBG.chromaEnable', 1);

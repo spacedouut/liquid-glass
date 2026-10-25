@@ -33,7 +33,9 @@ first port look bad, now fixed:
 - the CPU-baked SDF had its y gradient flipped relative to the backdrop uvs
 
 Values that aren't recovered (spectral knots/weights, rim matrix, inner
-refraction pair) are guesses and are labeled as sliders.
+refraction pair) are guesses and are labeled as sliders. "Blur at rim" is one
+of those: it sets how much of the center blur survives the knot remap at the
+edge, and the foreground pass's taps use the same lod.
 
 All lengths are in points. "macOS" applies the recovered values: displacement
 height 20, curvature 1, refraction 30, highlight angle 90° / spread 180° /
