@@ -47,22 +47,25 @@ void main(){
   O = vec4(c / sum, 1.0);
 }`;
 
-// Half-res downsample for the QC backdrop pyramid: 3x3 binomial kernel
-// ((1,2,1)^2 / 16) in source space — a real gaussian-ish prefilter instead of
-// generateMipmap's 2x2 box, so magnified mips read as blur, not a pixel grid.
+// Half-res downsample for the QC backdrop pyramid. A gaussian (sigma ~1 src px,
+// 6x6 texel footprint) built from 3x3 bilinear taps: the center tap sits on a
+// texel corner so it averages the 2x2 block under the dest pixel, the side taps
+// at ±1.62 px blend texels 1.5/2.5 out with gaussian weights. generateMipmap's
+// 2x2 box let stripes alias into the coarse levels (moiré under the glass).
 const DOWN_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uSrc;
 uniform vec2 uSrcRes;
 out vec4 O;
+const float T = 1.619, WC = 0.7054, WS = 0.1473;
 void main(){
-  vec2 h = 1.0 / uSrcRes, uv = gl_FragCoord.xy * 2.0 * h;
-  vec4 c = texture(uSrc, uv + vec2(-h.x, -h.y)) + texture(uSrc, uv + vec2(-h.x, h.y))
-         + texture(uSrc, uv + vec2( h.x, -h.y)) + texture(uSrc, uv + vec2( h.x, h.y))
+  vec2 h = T / uSrcRes, uv = gl_FragCoord.xy * 2.0 / uSrcRes;
+  vec4 c = texture(uSrc, uv) * (WC * WC)
          + (texture(uSrc, uv + vec2(-h.x, 0.0)) + texture(uSrc, uv + vec2(h.x, 0.0))
-         +  texture(uSrc, uv + vec2(0.0, -h.y)) + texture(uSrc, uv + vec2(0.0, h.y))) * 2.0
-         + texture(uSrc, uv) * 4.0;
-  O = c / 16.0;
+         +  texture(uSrc, uv + vec2(0.0, -h.y)) + texture(uSrc, uv + vec2(0.0, h.y))) * (WC * WS)
+         + (texture(uSrc, uv + vec2(-h.x, -h.y)) + texture(uSrc, uv + vec2(-h.x, h.y))
+         +  texture(uSrc, uv + vec2( h.x, -h.y)) + texture(uSrc, uv + vec2( h.x, h.y))) * (WS * WS);
+  O = c;
 }`;
 
 // Rounded rect in pt (negative inside); uExp 2 = circular corners, >2 = squircle.
@@ -207,6 +210,7 @@ uniform GlassForegroundUniforms uFG;
 uniform bool uFgOn;
 uniform float globalAlpha;
 uniform sampler2D srcTex;
+uniform float uMaxLod;
 uniform vec2  uRes, uCenter;
 uniform float uDpr;
 uniform float uShadow, uShRad;
@@ -237,7 +241,29 @@ float lensProfile(float x){
   r = r * q2 + 0.168213; r = r * q2 - 0.560547; r = r * q + 0.5;
   return r;
 }
-vec4 smp(vec2 uv, float lod){ return textureLod(srcTex, uv, lod); }
+// Reading a coarse mip with plain bilinear shows the level's texel grid once
+// it's magnified 4x+ (the "pixelated" blur). Levels >= 1 go through a cubic
+// B-spline reconstruction instead (4 bilinear taps, Sigg & Hadwiger), and the
+// two bracketing levels are mixed by hand since textureLod can't do that.
+vec4 smpLevel(vec2 uv, float lvl){
+  if (lvl < 0.5) return textureLod(srcTex, uv, 0.0);
+  vec2 res = vec2(textureSize(srcTex, int(lvl)));
+  vec2 p = uv * res - 0.5, f = fract(p), i = p - f;
+  vec2 f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  vec2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  vec2 w3 = f3 / 6.0;
+  vec2 s0 = w0 + w1, s1 = 1.0 - s0;
+  vec2 t0 = (i - 0.5 + w1 / s0) / res, t1 = (i + 1.5 + w3 / s1) / res;
+  return (textureLod(srcTex, t0, lvl) * s0.x + textureLod(srcTex, vec2(t1.x, t0.y), lvl) * s1.x) * s0.y
+       + (textureLod(srcTex, vec2(t0.x, t1.y), lvl) * s0.x + textureLod(srcTex, t1, lvl) * s1.x) * s1.y;
+}
+vec4 smp(vec2 uv, float lod){
+  lod = clamp(lod, 0.0, uMaxLod);
+  float l0 = floor(lod), t = lod - l0;
+  vec4 a = smpLevel(uv, l0);
+  return t > 0.0 ? mix(a, smpLevel(uv, l0 + 1.0), t) : a;
+}
 
 vec4 glassBackground(vec2 uv0, vec2 q){
   vec4 t = sdfTex(q);
@@ -785,7 +811,7 @@ function drawQC(W, H, cover){
   f('uBG.caAmount1', state.qAmount); f('uBG.caEdge1', 1 / state.qHeight);
   f('uBG.caAmount2', state.qAmount2); f('uBG.caEdge2', 1 / state.qHeight2);
   f('uBG.caMixLo', -11); f('uBG.caMixHi', -3); f('uBG.caMixAmount', state.qMix);
-  f('uBG.mipLodScale1', state.qBlur); f('uBG.mipLodScale3', state.qRimBlur); f('uBG.blurMip', state.qBlur);
+  f('uMaxLod', back.levels - 1); f('uBG.mipLodScale1', state.qBlur); f('uBG.mipLodScale3', state.qRimBlur); f('uBG.blurMip', state.qBlur);
   f('uBG.rimAmount', state.qRimAmount); f('uBG.rimEdge', 1 / state.qRimHeight);
   f('uBG.rimLo', -state.qRimHeight); f('uBG.rimHi', 0); f('uBG.rimStrength', state.qRimStrength);
   f('uBG.lensAmount', state.qAmount); f('uBG.lensEdge', 1 / state.qHeight); f('uBG.lensBase', 0);
