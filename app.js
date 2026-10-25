@@ -47,6 +47,24 @@ void main(){
   O = vec4(c / sum, 1.0);
 }`;
 
+// Half-res downsample for the QC backdrop pyramid: tent filter (4 corner taps
+// at +-1 src px + weighted center) instead of generateMipmap's 2x2 box, so
+// diagonal/high-contrast content doesn't alias into visible blocks.
+const DOWN_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform vec2 uSrcRes;
+out vec4 O;
+void main(){
+  vec2 h = 1.0 / uSrcRes, uv = gl_FragCoord.xy * 2.0 * h;
+  vec4 c = texture(uSrc, uv) * 4.0;
+  c += texture(uSrc, uv + vec2(-h.x, -h.y));
+  c += texture(uSrc, uv + vec2( h.x, -h.y));
+  c += texture(uSrc, uv + vec2(-h.x,  h.y));
+  c += texture(uSrc, uv + vec2( h.x,  h.y));
+  O = c / 8.0;
+}`;
+
 // Rounded rect in pt (negative inside); uExp 2 = circular corners, >2 = squircle.
 const SDF_GLSL = `
 uniform vec2  uHalf;
@@ -336,6 +354,8 @@ void main(){
   vec4 bg = glassBackground(uv0, q);
   c = bg.rgb + c * (1.0 - bg.a);
   if (uFgOn) { vec4 fg = glassForeground(uv0, q); c = fg.rgb + c * (1.0 - fg.a); }
+  // Dither: RGBA8 banding shows on smooth gradients otherwise.
+  c += (fract(sin(dot(px, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
   frag = vec4(c, 1.0);
 }`;
 
@@ -356,7 +376,7 @@ function program(fs){
   for (let i = 0; i < n; i++) { const a = gl.getActiveUniform(p, i); u[a.name] = gl.getUniformLocation(p, a.name); }
   return { p, u };
 }
-const pCover = program(COVER_FS), pBlur = program(BLUR_FS), pGlass = program(GLASS_FS), pQC = program(QC_FS);
+const pCover = program(COVER_FS), pBlur = program(BLUR_FS), pDown = program(DOWN_FS), pGlass = program(GLASS_FS), pQC = program(QC_FS);
 
 gl.bindVertexArray(gl.createVertexArray());
 gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
@@ -389,19 +409,22 @@ function ensureRT(w, h){
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
-const back = { t: tex(), f: gl.createFramebuffer(), w: 0, h: 0, dirty: true };
+// Screen-space backdrop the QC shaders sample: a real mip chain (immutable
+// storage), each level rendered with DOWN_FS rather than generateMipmap so
+// the pyramid is properly band-limited.
+const back = { t: tex(), f: gl.createFramebuffer(), w: 0, h: 0, levels: 1, dirty: true };
 function ensureBack(W, H, cover){
   if (back.w !== W || back.h !== H) {
     back.w = W; back.h = H; back.dirty = true;
+    back.levels = Math.floor(Math.log2(Math.max(W, H))) + 1;
     gl.bindTexture(gl.TEXTURE_2D, back.t);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texStorage2D(gl.TEXTURE_2D, back.levels, gl.RGBA8, W, H);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, back.f);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, back.t, 0);
   }
   if (!back.dirty) return;
   back.dirty = false;
   gl.bindFramebuffer(gl.FRAMEBUFFER, back.f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, back.t, 0);
   gl.viewport(0, 0, W, H);
   gl.useProgram(pCover.p);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, imgTex);
@@ -409,9 +432,25 @@ function ensureBack(W, H, cover){
   gl.uniform2f(pCover.u.uRes, W, H);
   gl.uniform2f(pCover.u.uCover, cover[0], cover[1]);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  // Fill each mip level from the previous one. Narrowing BASE/MAX_LEVEL to the
+  // source level keeps this legal (no feedback loop) while reusing one texture.
   gl.bindTexture(gl.TEXTURE_2D, back.t);
-  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.useProgram(pDown.p);
+  gl.uniform1i(pDown.u.uSrc, 0);
+  let sw = W, sh = H;
+  for (let i = 1; i < back.levels; i++) {
+    const w = Math.max(1, W >> i), h = Math.max(1, H >> i);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, i - 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, i - 1);
+    gl.uniform2f(pDown.u.uSrcRes, sw, sh);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, back.t, i);
+    gl.viewport(0, 0, w, h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    sw = w; sh = h;
+  }
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, back.levels - 1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
 // ---- wallpapers --------------------------------------------------------------
@@ -467,6 +506,9 @@ const MACOS = {
   qAngle: 0, qHeight: 20, qAmount: 30, qSpec: 0.75,
 };
 const state = Object.assign({}, DEFAULTS);
+// ?key=value overrides for any param (e.g. ?qc=1&follow=0) — handy for testing.
+for (const [k, v] of new URLSearchParams(location.search))
+  if (k in state) state[k] = v === 'true' || v === '1' ? true : v === 'false' || v === '0' ? false : isNaN(+v) ? v : +v;
 const pos = { x: 0, y: 0 }, target = { x: 0, y: 0 };   // CSS px, y down
 
 const analytic = () => !state.qc, quartz = () => state.qc;
