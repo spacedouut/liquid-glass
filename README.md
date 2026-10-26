@@ -40,8 +40,8 @@ things that turned out different from the old guesses:
   min(0.7 S, 160) blur, and the shadow height is 0.4 S. Under S = 160 the blur
   radius shrinks, the bleed fades out and the shadow gets darker. `qcRecipe()`
   rebuilds all of it, and "Size-driven amounts" reapplies it when you resize
-- dark mode only changes colors, not amounts. Clear glass is the same in light
-  and dark
+- dark mode changes colors plus the bleed/shadow opacities and `inputClamp`.
+  Clear glass is the same in light and dark
 - `inputClamp` is 1.06961 for regular light, 1.0 for regular dark and 1.375824
   for clear, applied per channel (`ClampPreserveHue` is off)
 - the backdrop is captured at 1/4 resolution for regular and 1/2 for clear

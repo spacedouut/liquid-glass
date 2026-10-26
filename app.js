@@ -401,14 +401,17 @@ function loadWall(i){
 
 // ---- params (pt / degrees) ---------------------------------------------------
 const DEFAULTS = {
-  w: 360, h: 220, radius: 56, squircle: true, exp: 5,
+  // exp 3 + radius*1.375 is the measured fit to CASDFElementLayer's continuous
+  // corner; the slider explores around it (5+ gets squarer than real glass).
+  w: 360, h: 220, radius: 56, squircle: true, exp: 3,
   follow: true, followResponse: 0.15, followDamping: 0.85,
   qAngle: 0, qDark: false, qRimHl: true, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
 };
 // glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6), read live
 // off the CABackdropLayer's CAFilter in a key titled window. Most amounts scale
 // with the glass's short side S in pt. Under S = 160 the blur shrinks, the bleed
-// fades out and the shadow gets darker. Dark mode only changes colors, and clear
+// fades out and the shadow gets darker. Dark mode changes colors plus the
+// bleed/shadow opacities and the clamp, and clear
 // glass is the same in light and dark. An unfocused window gets a flat recipe
 // with no outer refraction, bleed or shadow. Color matrices are
 // [black, white, saturation(, fill alpha)] fed through set_ycc_composite.
@@ -455,7 +458,7 @@ Object.assign(DEFAULTS, { qSized: true }, qcRecipe(Math.min(DEFAULTS.w, DEFAULTS
 // displacement height 20 + curvature 1, refraction height 30, highlight
 // angle pi/2 spread pi amount 0.5, key/fill amounts 0.5, shadow radius 10 offset {0,-10}.
 // Continuous (squircle) corners are what CALayer uses for glass.
-const MACOS = { squircle: true, qAngle: 0 };
+const MACOS = { squircle: true, exp: 3, qAngle: 0, qClear: false, qDark: false, qActive: true };
 const state = Object.assign({}, DEFAULTS);
 // ?key=value overrides for any param (e.g. ?qDark=1&follow=0) — handy for testing.
 // qClear/qDark/qActive/w/h pick the recipe first, then the remaining overrides apply.
@@ -668,7 +671,7 @@ function drawQC(W, H, cover){
   // continuous measures as radius*1.375 at exp 3 (0.3pt RMS fit).
   f('uHalf', hw, hh);
   f('uRadius', Math.min(state.radius * (state.squircle ? 1.375 : 1), hw, hh));
-  f('uExp', state.squircle ? 3 : 2);
+  f('uExp', state.squircle ? state.exp : 2);
   f('uShadow', 0);   // the glass's own shadow term (tint) draws it
   f('globalAlpha', 1);
   gl.uniform1i(u.uFgOn, state.qFgOn ? 1 : 0);
