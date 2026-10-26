@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Liquid Glass — CSS/SVG filters</title>
+<style>
+  :root { color-scheme: dark; --accent:#8fb4ff; }
+  html, body { margin:0; height:100%; background:#000 center/cover no-repeat; overflow:hidden;
+               font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #glass { position:fixed; left:0; top:0; overflow:hidden; cursor:grab; touch-action:none; will-change:transform; }
+  #glass.dragging { cursor:grabbing; }
+  #glass .bd { position:absolute; background-repeat:no-repeat; }
+  #panel {
+    position:fixed; top:12px; right:12px; width:256px; box-sizing:border-box; padding:12px 14px 14px;
+    background:rgba(10,10,12,.78); color:#e4e6ec; border:1px solid rgba(255,255,255,.1); border-radius:14px;
+    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px); font-size:12px; user-select:none;
+  }
+  #panel header { font-weight:600; } #panel header span { font-weight:400; opacity:.45; font-size:11px; }
+  .group { margin-top:14px; font-size:10px; text-transform:uppercase; letter-spacing:.1em; opacity:.45; }
+  .row { margin-top:8px; } .row .top { display:flex; justify-content:space-between; margin-bottom:3px; }
+  .row .val { opacity:.55; font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; margin:0; accent-color:var(--accent); }
+  .btns { display:flex; gap:6px; margin-top:8px; }
+  button { flex:1; padding:6px 0; border-radius:8px; cursor:pointer; font:inherit; font-size:12px;
+           color:#e4e6ec; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.12); }
+  button.on { border-color:var(--accent); color:var(--accent); }
+  #wall { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:fixed"><defs id="defs"></defs></svg>
+<div id="glass"><div class="bd"></div></div>
+<div id="panel">
+  <header>Liquid Glass, CSS edition <span>H hides</span></header>
+  <div id="pb"></div>
+</div>
+<script>
+(() => {
+// Same glassBackground recipe as app.js (macOS 26.6 NSGlassEffectView, light
+// mode), approximated with one SVG filter: blur -> displacement -> face color
+// matrix -> luma-gated bleed. See README for what doesn't survive the trip.
+const WALLS = [
+  '11-Big-Sur-Day','11-Big-Sur-Night','11-Big-Sur-Color-Day','11-Big-Sur-Color-Night',
+  '12-Monterey-Light','12-Monterey-Dark','13-Ventura-Light','13-Ventura-Dark',
+  '14-Sonoma-Light','14-Sonoma-Dark','14-Sonoma-Horizon',
+  '15-Sequoia-Light','15-Sequoia-Dark','15-Sequoia-Sunrise',
+  '26-Tahoe-Light','26-Tahoe-Dark','26-Tahoe-Beach-Day','26-Tahoe-Beach-Dusk',
+  '27-Golden-Gate'];
+const REGULAR = {
+  blur: 4, innerAmount: -60, innerHeight: 20,
+  bleedBlur: 140, bleedOpacity: 0.5, bleedCM: [0.9, 1, 1.2],
+  face: [0.5, 1.03, 1, 0.4], shadowOpacity: 0.25, shadowBlur: 40,
+};
+const CLEAR = {
+  ...REGULAR, blur: 1, bleedBlur: 0, bleedOpacity: 0, bleedCM: [0.75, 1, 1.2],
+  face: [0.075, 1.15, 1.06, 0], shadowOpacity: 0, shadowBlur: 0,
+};
+const BLUR_DIST = [-100, -1, 0, 0], BLUR_OP = [1, 0.5, 0.5, 1], SDR_WHITE = 0.97;
+const PAD = 64;   // backdrop kept around the glass so blur/displacement can read outside it
+
+const state = { w: 360, h: 220, radius: 56, exp: 5, clear: false, blurK: 0.8, wall: 10, x: innerWidth / 2, y: innerHeight / 2 };
+for (const [k, v] of new URLSearchParams(location.search))
+  if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : +v;
+const pos = { x: state.x, y: state.y };
+
+// CA::ColorMatrix::set_ycc_composite, closed form. Rows r g b | bias.
+function ycc(black, white, sat, fill = [0, 0, 0, 0]){
+  const Y = [0.2126, 0.7152, 0.0722], k = white - black - 1, a = 1 - fill[3], rows = [];
+  for (let r = 0; r < 3; r++) {
+    const row = [];
+    for (let c = 0; c < 3; c++) {
+      let v = 0;
+      for (let j = 0; j < 3; j++) v += (sat * (r === j) + (1 - sat) * Y[j]) * ((j === c) + k * Y[c]);
+      row.push(a * v);
+    }
+    row.push(a * black + fill[r]); rows.push(row);
+  }
+  return rows;
+}
+const cmValues = (rows, gain = 1) => rows.map(r => `${r[0] * gain} ${r[1] * gain} ${r[2] * gain} 0 ${r[3] * gain}`).join(' ') + ' 0 0 0 1 0';
+function sdf(x, y, hw, hh, R, e){
+  const wx = Math.abs(x) - hw + R, wy = Math.abs(y) - hh + R, mx = Math.max(wx, 0), my = Math.max(wy, 0);
+  const c = e === 2 ? Math.hypot(mx, my) : Math.pow(Math.pow(mx, e) + Math.pow(my, e), 1 / e);
+  return c + Math.min(Math.max(wx, wy), 0) - R;
+}
+function edgeOffset(d, edge, amount){
+  const s = Math.min(Math.max(edge * -d, 0), 1);
+  return amount - amount * Math.min(Math.sqrt(s * (2 - s)), 1);
+}
+
+// Bakes the displacement map (R,G = inward refraction vector) and the blur
+// mix mask (R = how far toward the edge blur radius) for the padded box.
+function bakeMaps(W, H, v){
+  const cw = W + 2 * PAD, ch = H + 2 * PAD, hw = W / 2, hh = H / 2, R = Math.min(state.radius, hw, hh);
+  const scale = 2 * Math.abs(v.innerAmount) || 1;
+  const disp = document.createElement('canvas'), mask = document.createElement('canvas');
+  disp.width = mask.width = cw; disp.height = mask.height = ch;
+  const dc = disp.getContext('2d'), mc = mask.getContext('2d');
+  const di = dc.createImageData(cw, ch), mi = mc.createImageData(cw, ch);
+  const [k0, k1] = BLUR_DIST;
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+    const qx = x + 0.5 - PAD - hw, qy = y + 0.5 - PAD - hh;
+    const d = sdf(qx, qy, hw, hh, R, state.exp);
+    let gx = sdf(qx + 0.5, qy, hw, hh, R, state.exp) - sdf(qx - 0.5, qy, hw, hh, R, state.exp);
+    let gy = sdf(qx, qy + 0.5, hw, hh, R, state.exp) - sdf(qx, qy - 0.5, hw, hh, R, state.exp);
+    const gl = Math.hypot(gx, gy) || 1; gx /= gl; gy /= gl;
+    const e = edgeOffset(d, 1 / v.innerHeight, v.innerAmount);
+    const i = (y * cw + x) * 4;
+    di.data[i] = Math.round(255 * (0.5 + e * gx / scale));
+    di.data[i + 1] = Math.round(255 * (0.5 + e * gy / scale));
+    di.data[i + 2] = 0; di.data[i + 3] = 255;
+    // knot remap: blur scale = op0 - (op0-op1)*sat((x-k0)/(k1-k0)); the other
+    // two segments contribute 0 with the real knots
+    const m = Math.min(Math.max((e + d - k0) / (k1 - k0), 0), 1);
+    mi.data[i] = mi.data[i + 1] = mi.data[i + 2] = Math.round(255 * m); mi.data[i + 3] = 255;
+  }
+  dc.putImageData(di, 0, 0); mc.putImageData(mi, 0, 0);
+  return { disp: disp.toDataURL(), mask: mask.toDataURL(), scale, cw, ch };
+}
+
+// Mip lod -> gaussian sigma: level L of the pyramid (gaussian decimate +
+// cubic reconstruction) is about sigma = 0.8 * 2^L device px, and the CA
+// radius is 1.6 x input x dpr device px, so sigma_css ~= blurK * 1.6 * input.
+const sigma = (input, scale) => state.blurK * 1.6 * input * scale;
+
+function buildFilter(){
+  const v = state.clear ? CLEAR : REGULAR, W = state.w, H = state.h;
+  const maps = bakeMaps(W, H, v), { cw, ch } = maps;
+  const [fb, fw, fs, fa] = v.face, face = cmValues(ycc(fb, fw, fs, [fa, fa, fa, fa]), SDR_WHITE);
+  const bleed = cmValues(ycc(...v.bleedCM));
+  const sF = sigma(v.blur, BLUR_OP[0]), sE = sigma(v.blur, BLUR_OP[1]);
+  const sB = v.bleedOpacity > 0 ? sigma(0.5 * v.bleedBlur, 1) : 0;
+  const L = '0.2126 0.7152 0.0722 0 0';
+  document.getElementById('defs').innerHTML = `
+  <filter id="lg" x="0" y="0" width="${cw}" height="${ch}" filterUnits="userSpaceOnUse"
+          primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+    <feImage href="${maps.disp}" x="0" y="0" width="${cw}" height="${ch}" preserveAspectRatio="none" result="disp"/>
+    <feImage href="${maps.mask}" x="0" y="0" width="${cw}" height="${ch}" preserveAspectRatio="none" result="mask"/>
+    <feComponentTransfer in="mask" result="imask">
+      <feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/><feFuncB type="table" tableValues="1 0"/>
+    </feComponentTransfer>
+    <feGaussianBlur in="SourceGraphic" stdDeviation="${sF}" result="bF"/>
+    <feGaussianBlur in="SourceGraphic" stdDeviation="${sE}" result="bE"/>
+    <feComposite in="bF" in2="imask" operator="arithmetic" k1="1" result="bFm"/>
+    <feComposite in="bE" in2="mask" operator="arithmetic" k1="1" result="bEm"/>
+    <feComposite in="bFm" in2="bEm" operator="arithmetic" k2="1" k3="1" result="blur"/>
+    <feDisplacementMap in="blur" in2="disp" scale="${maps.scale}" xChannelSelector="R" yChannelSelector="G" result="refr"/>
+    <feColorMatrix in="refr" type="matrix" values="${face}" result="face"/>
+    ${v.bleedOpacity > 0 ? `
+    <feGaussianBlur in="SourceGraphic" stdDeviation="${sB}" result="amb"/>
+    <feColorMatrix in="amb" type="matrix" values="${bleed}" result="rimc"/>
+    <feColorMatrix in="face" type="matrix" values="${L} ${L} ${L} 0 0 0 1 0" result="lum"/>
+    <feComponentTransfer in="lum" result="e">
+      <feFuncR type="gamma" exponent="4" amplitude="${v.bleedOpacity}"/>
+      <feFuncG type="gamma" exponent="4" amplitude="${v.bleedOpacity}"/>
+      <feFuncB type="gamma" exponent="4" amplitude="${v.bleedOpacity}"/>
+    </feComponentTransfer>
+    <feComponentTransfer in="e" result="ie">
+      <feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/><feFuncB type="table" tableValues="1 0"/>
+    </feComponentTransfer>
+    <feComposite in="face" in2="ie" operator="arithmetic" k1="1" result="a"/>
+    <feComposite in="rimc" in2="e" operator="arithmetic" k1="1" result="b"/>
+    <feComposite in="a" in2="b" operator="arithmetic" k2="1" k3="1"/>` : ''}
+  </filter>`;
+  return v;
+}
+
+const glass = document.getElementById('glass'), bd = glass.querySelector('.bd');
+// Superellipse corner as a clip path (CALayer's continuous corners).
+function clipPath(W, H){
+  const R = Math.min(state.radius, W / 2, H / 2), e = state.exp, N = 24, pts = [];
+  const corner = (cx, cy, sx, sy, a0) => {
+    for (let i = 0; i <= N; i++) {
+      const t = a0 + (i / N) * Math.PI / 2, c = Math.cos(t), s = Math.sin(t);
+      pts.push([cx + sx * R * Math.sign(c) * Math.pow(Math.abs(c), 2 / e), cy + sy * R * Math.sign(s) * Math.pow(Math.abs(s), 2 / e)]);
+    }
+  };
+  corner(W - R, R, 1, 1, -Math.PI / 2); corner(W - R, H - R, 1, 1, 0);
+  corner(R, H - R, 1, 1, Math.PI / 2); corner(R, R, 1, 1, Math.PI);
+  return `path('M${pts.map(p => p.map(n => n.toFixed(2)).join(' ')).join('L')}Z')`;
+}
+let cover = { w: 0, h: 0, x: 0, y: 0 };
+function layoutWall(){
+  const img = new Image();
+  img.onload = () => {
+    const s = Math.max(innerWidth / img.width, innerHeight / img.height);
+    cover = { w: img.width * s, h: img.height * s };
+    cover.x = (innerWidth - cover.w) / 2; cover.y = (innerHeight - cover.h) / 2;
+    document.body.style.backgroundImage = `url(${img.src})`;
+    bd.style.backgroundImage = `url(${img.src})`;
+    bd.style.backgroundSize = `${cover.w}px ${cover.h}px`;
+    place();
+  };
+  img.src = `wallpapers/${WALLS[state.wall]}.jpg`;
+}
+let v = REGULAR;
+function rebuild(){
+  v = buildFilter();
+  const W = state.w, H = state.h;
+  glass.style.width = W + 'px'; glass.style.height = H + 'px';
+  glass.style.clipPath = clipPath(W, H);
+  // The glass's shadow term (tint) is a vibrant 25% copy of the backdrop under
+  // a 12% black fill; a plain drop shadow is the closest CSS has.
+  glass.style.boxShadow = v.shadowOpacity > 0
+    ? `0 8px ${2 * sigma(0.5 * v.shadowBlur, 1)}px rgba(0,0,0,${(0.12 * v.shadowOpacity).toFixed(3)})` : 'none';
+  Object.assign(bd.style, { left: -PAD + 'px', top: -PAD + 'px', width: W + 2 * PAD + 'px', height: H + 2 * PAD + 'px' });
+  // backdrop-filter: url(#svg) isn't supported by Chrome/Safari, so the glass
+  // carries its own copy of the wallpaper (same cover geometry) under filter:.
+  bd.style.filter = 'url(#lg)';
+  place();
+}
+function place(){
+  const x = Math.round(pos.x - state.w / 2), y = Math.round(pos.y - state.h / 2);
+  glass.style.transform = `translate(${x}px, ${y}px)`;
+  bd.style.backgroundPosition = `${cover.x - x + PAD}px ${cover.y - y + PAD}px`;
+}
+
+// ---- panel ----------------------------------------------------------------
+const pb = document.getElementById('pb'), controls = [];
+const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt) e.textContent = txt; return e; };
+const slider = (k, label, a, b, step) => {
+  const row = el('div', 'row'), top = el('div', 'top'), val = el('span', 'val'), input = el('input');
+  top.append(el('span', '', label), val); row.append(top, input); pb.appendChild(row);
+  Object.assign(input, { type: 'range', min: a, max: b, step });
+  input.oninput = () => { state[k] = +input.value; sync(); rebuild(); };
+  controls.push(() => { input.value = state[k]; val.textContent = state[k]; });
+};
+const toggle = (k, label) => {
+  const row = el('div', 'btns'), btn = el('button'); row.appendChild(btn); pb.appendChild(row);
+  btn.onclick = () => { state[k] = !state[k]; sync(); rebuild(); };
+  controls.push(() => { btn.textContent = `${label}: ${state[k] ? 'on' : 'off'}`; btn.classList.toggle('on', state[k]); });
+};
+const walls = el('div', 'btns'), wallBtn = el('button'); wallBtn.id = 'wall';
+const stepWall = d => { state.wall = (state.wall + d + WALLS.length) % WALLS.length; sync(); layoutWall(); };
+const prev = el('button', '', '‹'), next = el('button', '', '›');
+prev.onclick = () => stepWall(-1); next.onclick = () => stepWall(1); wallBtn.onclick = () => stepWall(1);
+prev.style.flex = next.style.flex = '0 0 30px'; wallBtn.style.flex = '1';
+walls.append(prev, wallBtn, next); pb.appendChild(walls);
+controls.push(() => { wallBtn.textContent = WALLS[state.wall].replace(/^\d+-/, '').replace(/-/g, ' '); });
+pb.appendChild(el('div', 'group', 'Recipe'));
+toggle('clear', 'Clear glass');
+pb.appendChild(el('div', 'group', 'Shape'));
+slider('w', 'Width', 40, 1200, 1); slider('h', 'Height', 40, 900, 1);
+slider('radius', 'Corner radius', 0, 450, 1); slider('exp', 'Corner smoothing', 2, 10, 0.1);
+pb.appendChild(el('div', 'group', 'Blur'));
+slider('blurK', 'Sigma per mip texel', 0.3, 1.5, 0.05);
+const note = el('div', 'group'); note.style.textTransform = 'none'; note.style.letterSpacing = '0';
+note.innerHTML = 'Drag the glass. <a href="./?qc=1">WebGL port</a> for the real thing.';
+pb.appendChild(note);
+function sync(){ for (const c of controls) c(); }
+const panel = document.getElementById('panel');
+addEventListener('keydown', e => { if (e.key === 'h' || e.key === 'H') panel.style.display = panel.style.display === 'none' ? '' : 'none'; });
+
+// ---- drag -----------------------------------------------------------------
+let drag = null;
+glass.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX - pos.x, y: e.clientY - pos.y }; glass.classList.add('dragging');
+  try { glass.setPointerCapture(e.pointerId); } catch {}
+});
+glass.addEventListener('pointermove', e => { if (drag) { pos.x = e.clientX - drag.x; pos.y = e.clientY - drag.y; place(); } });
+const end = () => { drag = null; glass.classList.remove('dragging'); };
+glass.addEventListener('pointerup', end); glass.addEventListener('pointercancel', end);
+addEventListener('resize', layoutWall);
+
+sync(); rebuild(); layoutWall();
+})();
+</script>
+</body>
+</html>

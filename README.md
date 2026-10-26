@@ -51,6 +51,16 @@ things that turned out different from the old guesses:
 
 Still missing: dark-mode values and the HDR clamp limit (left off).
 
+`css.html` is the same recipe done with CSS and SVG filters, no WebGL: one
+`filter: url(#lg)` chain doing blur, `feDisplacementMap` for the refraction
+(map baked from the same SDF/`edgeOffset`), the face matrix as
+`feColorMatrix`, and the luma-gated bleed as gamma + arithmetic composites.
+It gets surprisingly close. What it can't do: a per-pixel mip lod (it blends
+two gaussians by a mask instead), the 8-bit displacement map steps a little
+at the rim, the vibrant shadow is a plain `box-shadow`, and since browsers
+don't take SVG filters in `backdrop-filter`, the glass carries its own copy
+of the wallpaper, so it only works over a static background.
+
 All lengths are in points. "macOS" applies the recovered values: displacement
 height 20, curvature 1, refraction 30, highlight angle 90° / spread 180° /
 amount 0.5, fill 0.5, shadow radius 10 at {0, -10}. "Reset" goes back to the
