@@ -522,30 +522,40 @@ const DEFAULTS = {
   bright: 1.04, tint: '#ffffff', tintAmt: 0,
   shadow: 0.22, shRad: 18, shOffX: 0, shOffY: -8,
   qc: false,
-  qAngle: 0, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
+  qAngle: 0, qDark: false, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
 };
 // glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6, light
 // mode), read live off the CABackdropLayer's CAFilter. Color matrices are
 // [black, white, saturation(, fill alpha)] fed through set_ycc_composite.
 // Not covered: dark mode, and the HDR clamp (left off).
 const QC_REGULAR = {
-  qClear: false, qBlur: 4,
+  qClear: false, qDark: false, qBlur: 4, blurDist: [-100, -1, 0, 0],
   qInnerAmount: -60, qInnerHeight: 20, qOuterAmount: 40, qOuterHeight: 25, qRefrOpacity: 0.3,
-  qBleedAmount: 70, qBleedHeight: 70, qBleedBlur: 140, qBleedOpacity: 0.5,
-  qFaceBlack: 0.5, qFaceWhite: 1.03, qFaceSat: 1, qFill: 0.4,
+  qBleedAmount: 70, qBleedHeight: 70, qBleedBlur: 140, qBleedOpacity: 0.5, qBleedDarken: 1,
+  qFaceBlack: 0.5, qFaceWhite: 1.03, qFaceSat: 1, qFill: 0.4, qFillRgb: 1,
   qShadowOpacity: 0.25, qShadowBlur: 40, qShadowVibrancy: 1,
   qBleedCM: [0.9, 1, 1.2], qShadowCM: [0, 1, 1.8, 0.12],
+};
+// Same NSGlassEffectView in dark mode: amounts and blur distances grow ~10%,
+// the face flips to a dark tint (black fill, luma remap to [0.2, 0.6]) and the
+// bleed goes additive (darken off).
+const QC_DARK = {
+  ...QC_REGULAR, qDark: true, blurDist: [-110, -1, 0, 0],
+  qOuterAmount: 44, qOuterHeight: 27.5,
+  qBleedAmount: 77, qBleedHeight: 77, qBleedBlur: 154, qBleedOpacity: 0.8, qBleedDarken: 0,
+  qFaceBlack: 0.2, qFaceWhite: 0.6, qFaceSat: 1, qFill: 0.4, qFillRgb: 0,
+  qBleedCM: [0, 0.5, 1], qShadowCM: [0, 0.5, 1, 0],
 };
 const QC_CLEAR = {
   ...QC_REGULAR, qClear: true, qBlur: 1, qRefrOpacity: 0,
   qBleedAmount: 0, qBleedHeight: 0, qBleedBlur: 0, qBleedOpacity: 0,
-  qFaceBlack: 0.075, qFaceWhite: 1.15, qFaceSat: 1.06, qFill: 0,
+  qFaceBlack: 0.075, qFaceWhite: 1.15, qFaceSat: 1.06, qFill: 0, qFillRgb: 1,
   qShadowOpacity: 0, qShadowBlur: 0, qShadowVibrancy: 0,
   qBleedCM: [0.75, 1, 1.2], qShadowCM: [0, 1, 1.2, 0.1],
 };
 // Same for both variants.
 const QC_FIXED = {
-  blurDist: [-100, -1, 0, 0], blurOpacity: [1, 0.5, 0.5, 1],
+  blurOpacity: [1, 0.5, 0.5, 1],
   refrDist: [-1, 0], bleedDist: [1, 0],
   shadowAmount: 75, shadowHeight: 80, shadowRadius: 24, shadowOffset: [0, 8],
   sdrDist: [-2, -1], sdrWhite: 0.97, sdrShadowOpacity: 0.24,
@@ -563,7 +573,11 @@ const MACOS = {
 };
 const state = Object.assign({}, DEFAULTS);
 // ?key=value overrides for any param (e.g. ?qc=1&follow=0) — handy for testing.
-for (const [k, v] of new URLSearchParams(location.search))
+// qClear/qDark swap the whole recipe first, then the remaining overrides apply.
+const params = new URLSearchParams(location.search);
+if (params.get('qDark') === 'true' || params.get('qDark') === '1') Object.assign(state, QC_DARK);
+else if (params.get('qClear') === 'true' || params.get('qClear') === '1') Object.assign(state, QC_CLEAR);
+for (const [k, v] of params)
   if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : isNaN(+v) ? v : +v;
 const pos = { x: 0, y: 0 }, target = { x: 0, y: 0 };   // CSS px, y down
 
@@ -602,6 +616,7 @@ const SCHEMA = [
   ['tint', 'Tint color', 'color'],
   ['Variant', quartz],
   ['qClear', 'Clear glass', 'toggle'],
+  ['qDark', 'Dark mode', 'toggle'],
   ['Refraction', quartz],
   ['qAngle', 'Angle', -180, 180, 1],
   ['qInnerAmount', 'Inner amount', -150, 150, 0.5],
@@ -654,7 +669,11 @@ for (const item of SCHEMA) {
   if (a === 'toggle') {
     const row = el('div', 'btns'), btn = el('button');
     row.appendChild(btn); body.appendChild(row);
-    btn.onclick = () => { state[k] = !state[k]; if (k === 'qClear') Object.assign(state, state.qClear ? QC_CLEAR : QC_REGULAR); sync(); };
+    btn.onclick = () => {
+      state[k] = !state[k];
+      if (k === 'qClear' || k === 'qDark') Object.assign(state, state.qDark ? QC_DARK : state.qClear ? QC_CLEAR : QC_REGULAR);
+      sync();
+    };
     controls.push({ k, row, visible, sync: () => { btn.textContent = `${label}: ${state[k] ? 'on' : 'off'}`; btn.classList.toggle('on', state[k]); } });
     continue;
   }
@@ -862,13 +881,13 @@ function drawQC(W, H, cover){
   f('uBG.mipLodScale3', state.qBleedOpacity > 0 ? S * 0.5 * state.qBleedBlur : 0);
   f('uBG.blurMip', state.qShadowOpacity > 0 ? S * 0.5 * state.qShadowBlur : 0);
   f('uBG.caLumaBias', op[0]); f('uBG.spec', op[0] - op[1], op[1] - op[2], op[2] - op[3]);
-  f('uBG.knots', ...X.blurDist); f('uBG.chromaEnable', 1);
+  f('uBG.knots', ...state.blurDist); f('uBG.chromaEnable', 1);
   f('uBG.rimAmount', state.qBleedAmount); f('uBG.rimEdge', inv(state.qBleedHeight));
   f('uBG.rimLo', X.bleedDist[0]); f('uBG.rimHi', X.bleedDist[1]); f('uBG.rimStrength', sat01(state.qBleedOpacity));
-  f('uBG.specScaleBias', 1, 0);   // BleedDarkenBlend on
-  cm('uBG.face', ycc(state.qFaceBlack, state.qFaceWhite, state.qFaceSat, [state.qFill, state.qFill, state.qFill, state.qFill]));
+  f('uBG.specScaleBias', ...(state.qBleedDarken ? [1, 0] : [-1, 1]));
+  const [bb, bw, bs] = state.qBleedCM, [sb, sw, ss, sa] = state.qShadowCM, fa = state.qFill, fr = state.qFillRgb * fa;
+  cm('uBG.face', ycc(state.qFaceBlack, state.qFaceWhite, state.qFaceSat, [fr, fr, fr, fa]));
   f('uBG.mat2Amount', 1);
-  const [bb, bw, bs] = state.qBleedCM, [sb, sw, ss, sa] = state.qShadowCM;
   cm('uBG.rim', ycc(bb, bw, bs));
   cm('uBG.tint', ycc(sb, sw, ss, [0, 0, 0, sa]));
   // SDR: headroom fraction h = 0, so holding tone is fully on and the SDR

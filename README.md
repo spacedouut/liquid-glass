@@ -49,7 +49,8 @@ things that turned out different from the old guesses:
 - the face/bleed/shadow color matrices are `set_ycc_composite` (luma remap
   into [black, white], saturate, composite under the fill), rebuilt in `ycc()`
 
-Still missing: dark-mode values and the HDR clamp limit (left off).
+Still missing: the HDR clamp limit (left off). Dark mode is its own
+recipe (QC_DARK): AppKit only changes colors and amounts, not the math.
 
 `css.html` is the same recipe done with CSS and SVG filters, no WebGL: one
 `filter: url(#lg)` chain doing blur, `feDisplacementMap` for the refraction
