@@ -210,7 +210,7 @@ uniform GlassForegroundUniforms uFG;
 uniform bool uFgOn;
 uniform float globalAlpha;
 uniform sampler2D srcTex;
-uniform float uMaxLod;
+uniform float uMinLod, uMaxLod;
 uniform vec2  uRes, uCenter;
 uniform float uDpr;
 uniform float uShadow, uShRad;
@@ -268,6 +268,9 @@ vec4 smp(vec2 uv, float lod){
   vec4 a = smpLevel(uv, l0);
   return t > 0.0 ? mix(a, smpLevel(uv, l0 + 1.0), t) : a;
 }
+// Glass reads: the backdrop is captured at CABackdropLayer.scale, so nothing
+// finer than that level exists under the glass.
+vec4 smpG(vec2 uv, float lod){ return smp(uv, max(lod, uMinLod)); }
 
 vec4 glassBackground(vec2 uv0, vec2 q){
   vec4 t = sdfTex(q);
@@ -283,7 +286,7 @@ vec4 glassBackground(vec2 uv0, vec2 q){
     float mag = uBG.lensScale * resamp.y * lensProfile(resamp.x * uBG.profileScale);
     if (mag < 6.10352e-05 && cov == 0.0) return vec4(0.0);
     if (uBG.tintAmount > EPS) {
-      vec3 rgb = killTiny(unPremul(smp(uvLens, mipLod(uBG.blurMip))));
+      vec3 rgb = killTiny(unPremul(smpG(uvLens, mipLod(uBG.blurMip))));
       tint = vec4(uBG.tintM * rgb * uBG.tintAmount + uBG.tintBias, mix(uBG.tintAlpha, 1.0, uBG.tintAmount));
     } else {
       tint = vec4(uBG.tintBias, uBG.tintAlpha);
@@ -301,25 +304,25 @@ vec4 glassBackground(vec2 uv0, vec2 q){
       float eA = edgeOffset(d, 0.0, uBG.caEdge1, uBG.caAmount1);
       vec3 spA = seg * clamp((vec3(eA + d) - lo) / (hi - lo + 1.0 - seg), 0.0, 1.0);
       float lodA = (uBG.caLumaBias - dot(spA, uBG.spec)) * uBG.mipLodScale1;
-      vec4 sA = smp(uv0 + eA * grad, mipLod(lodA));
+      vec4 sA = smpG(uv0 + eA * grad, mipLod(lodA));
       sA = vec4(killTiny(sA.rgb), sA.a);
       if (uBG.caMixAmount > 0.0) {
         float eB = edgeOffset(d, 0.0, uBG.caEdge2, uBG.caAmount2);
         vec3 spB = seg * clamp((vec3(eB + d) - lo) / (hi - lo + 1.0 - seg), 0.0, 1.0);
         float lodB = (uBG.caLumaBias - dot(spB, uBG.spec)) * uBG.mipLodScale1;
-        vec4 sB = smp(uv0 + eB * grad, mipLod(lodB));
+        vec4 sB = smpG(uv0 + eB * grad, mipLod(lodB));
         sB = vec4(killTiny(sB.rgb), sB.a);
         float k = uBG.caMixAmount * clamp((d - uBG.caMixLo) / (uBG.caMixHi - uBG.caMixLo), 0.0, 1.0);
         s = mix(sA, sB, k);
       } else s = sA;
     } else {
-      s = smp(uv0, mipLod(uBG.mipLodScale1));
+      s = smpG(uv0, mipLod(uBG.mipLodScale1));
     }
     vec3 rgb = unPremul(s);
     if (uBG.mat2Amount > 0.0)
       rgb = mix(rgb, uBG.faceM * rgb + uBG.faceBias, uBG.mat2Amount);
     vec2 uvRim = uv0 + edgeOffset(d, 0.0, uBG.rimEdge, uBG.rimAmount) * grad;
-    vec3 rgbR = uBG.rimM * killTiny(unPremul(smp(uvRim, mipLod(uBG.mipLodScale3)))) + uBG.rimBias;
+    vec3 rgbR = uBG.rimM * killTiny(unPremul(smpG(uvRim, mipLod(uBG.mipLodScale3)))) + uBG.rimBias;
     float rim = clamp((d - uBG.rimLo) / (uBG.rimHi - uBG.rimLo), 0.0, 1.0);
     float lum = clamp(dot(rgb, LUMA709), 0.0, 1.0);
     float e = uBG.specScaleBias.x * lum + uBG.specScaleBias.y;
@@ -534,7 +537,7 @@ function loadWall(i){
 // ---- params (pt / degrees) ---------------------------------------------------
 const DEFAULTS = {
   w: 360, h: 220, radius: 56, squircle: true, exp: 5,
-  follow: true, followSpeed: 0.18,
+  follow: true, followResponse: 0.15, followDamping: 0.85,
   band: 32, refract: 40, curv: 1, ca: 0.08,
   frostRadius: 6, frost: 0.5,
   light: 90, spread: 180, hlAmt: 0.5, hlHeight: 6, fill: 0.25,
@@ -544,43 +547,52 @@ const DEFAULTS = {
   qc: false,
   qAngle: 0, qDark: false, qRimHl: true, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
 };
-// glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6, light
-// mode), read live off the CABackdropLayer's CAFilter. Color matrices are
+// glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6), read live
+// off the CABackdropLayer's CAFilter in a key titled window. Most amounts scale
+// with the glass's short side S in pt. Under S = 160 the blur shrinks, the bleed
+// fades out and the shadow gets darker. Dark mode only changes colors, and clear
+// glass is the same in light and dark. An unfocused window gets a flat recipe
+// with no outer refraction, bleed or shadow. Color matrices are
 // [black, white, saturation(, fill alpha)] fed through set_ycc_composite.
-// Not covered: dark mode, and the HDR clamp (left off).
-const QC_REGULAR = {
-  qClear: false, qDark: false, qBlur: 4, blurDist: [-100, -1, 0, 0],
-  qInnerAmount: -60, qInnerHeight: 20, qOuterAmount: 40, qOuterHeight: 25, qRefrOpacity: 0.3,
-  qBleedAmount: 70, qBleedHeight: 70, qBleedBlur: 140, qBleedOpacity: 0.5, qBleedDarken: 1,
-  qFaceBlack: 0.5, qFaceWhite: 1.03, qFaceSat: 1, qFill: 0.4, qFillRgb: 1,
-  qShadowOpacity: 0.25, qShadowBlur: 40, qShadowVibrancy: 1,
-  qBleedCM: [0.9, 1, 1.2], qShadowCM: [0, 1, 1.8, 0.12],
-};
-// Same NSGlassEffectView in dark mode: amounts and blur distances grow ~10%,
-// the face flips to a dark tint (black fill, luma remap to [0.2, 0.6]) and the
-// bleed goes additive (darken off).
-const QC_DARK = {
-  ...QC_REGULAR, qDark: true, blurDist: [-110, -1, 0, 0],
-  qOuterAmount: 44, qOuterHeight: 27.5,
-  qBleedAmount: 77, qBleedHeight: 77, qBleedBlur: 154, qBleedOpacity: 0.8, qBleedDarken: 0,
-  qFaceBlack: 0.2, qFaceWhite: 0.6, qFaceSat: 1, qFill: 0.4, qFillRgb: 0,
-  qBleedCM: [0, 0.5, 1], qShadowCM: [0, 0.5, 1, 0],
-};
-const QC_CLEAR = {
-  ...QC_REGULAR, qClear: true, qBlur: 1, qRefrOpacity: 0,
-  qBleedAmount: 0, qBleedHeight: 0, qBleedBlur: 0, qBleedOpacity: 0,
-  qFaceBlack: 0.075, qFaceWhite: 1.15, qFaceSat: 1.06, qFill: 0, qFillRgb: 1,
-  qShadowOpacity: 0, qShadowBlur: 0, qShadowVibrancy: 0,
-  qBleedCM: [0.75, 1, 1.2], qShadowCM: [0, 1, 1.2, 0.1],
-};
-// Same for both variants.
+const clamp01 = v => Math.min(Math.max(v, 0), 1);
+function qcRecipe(S, clear, dark, active){
+  const t = clamp01((S - 64) / 96), small = clamp01((160 - S) / 112);
+  const r = {
+    qClear: clear, qDark: dark, qActive: active,
+    qInnerAmount: -60, qInnerHeight: 20,
+    qOuterAmount: 0.2 * S, qOuterHeight: 0.125 * S, qRefrOpacity: clear ? 0 : 0.3,
+    qBlur: clear ? 1 : Math.min(Math.max(4 - (160 - S) / 42, 4 / 3), 4),
+    blurDist: [-0.5 * S, -1, 0, 0], qBlurOpacity: [1, 0.5, 0.5, 1],
+    qBleedAmount: clear ? 0 : 0.35 * S, qBleedHeight: clear ? 0 : 0.35 * S,
+    qBleedBlur: clear || t === 0 ? 0 : Math.min(0.7 * S, 160),
+    qBleedOpacity: clear ? 0 : (dark ? 0.8 : 0.5) * t, qBleedDarken: dark ? 0 : 1,
+    qShadowOpacity: clear ? 0 : 0.25 + (dark ? 0.15 : 0.25) * small,
+    qShadowBlur: clear ? 0 : 40, qShadowHeight: 0.4 * S, qShadowVibrancy: clear ? 0 : t,
+    qSdrHold: 1, qClamp: clear ? 1.375824 : dark ? 1 : 1.06961,
+    qCaptureScale: clear ? 0.5 : 0.25,   // CABackdropLayer.scale
+  };
+  if (clear) Object.assign(r, { qFaceBlack: 0.075, qFaceWhite: 1.15, qFaceSat: 1.06, qFill: 0, qFillRgb: 1,
+    qBleedCM: [0.75, 1, 1.2], qShadowCM: [0, 1, 1.2, 0.1] });
+  else if (dark) Object.assign(r, { qFaceBlack: 0.2, qFaceWhite: 0.6, qFaceSat: 1, qFill: 0.4, qFillRgb: 0,
+    qBleedCM: [0, 0.5, 1], qShadowCM: [0, 0.5, 1, 0] });
+  else Object.assign(r, { qFaceBlack: S < 64 ? 0.85 : 0.5, qFaceWhite: 1.03, qFaceSat: 1,
+    qFill: S < 64 ? 0.25 : 0.4, qFillRgb: 1, qBleedCM: [0.9, 1, 1.2], qShadowCM: [0, 1, 1.8, 0.12] });
+  if (!active) Object.assign(r, {
+    qOuterAmount: 0, qOuterHeight: 0, qRefrOpacity: 0, blurDist: [0, 0, 0, 0], qBlurOpacity: [1, 1, 1, 1],
+    qBleedBlur: 0, qBleedOpacity: 0, qShadowOpacity: 0, qShadowBlur: 0, qShadowVibrancy: 0,
+    qSdrHold: 0, qClamp: 1,
+  }, clear ? { qBlur: 10, qFaceBlack: dark ? 0.05 : 0.2, qFaceWhite: dark ? 0.8 : 0.95, qFaceSat: 1, qFill: dark ? 0.05 : 0.1 }
+           : { qFaceWhite: dark ? 0.6 : 0.95, qFill: 0.35 });
+  return r;
+}
+// Same for every variant.
 const QC_FIXED = {
-  blurOpacity: [1, 0.5, 0.5, 1],
   refrDist: [-1, 0], bleedDist: [1, 0],
-  shadowAmount: 75, shadowHeight: 80, shadowRadius: 24, shadowOffset: [0, 8],
+  shadowAmount: 75, shadowRadius: 24, shadowOffset: [0, 8],
   sdrDist: [-2, -1], sdrWhite: 0.97, sdrShadowOpacity: 0.24,
 };
-Object.assign(DEFAULTS, QC_REGULAR);
+const applyRecipe = st => Object.assign(st, qcRecipe(Math.min(st.w, st.h), st.qClear, st.qDark, st.qActive));
+Object.assign(DEFAULTS, { qSized: true }, qcRecipe(Math.min(DEFAULTS.w, DEFAULTS.h), false, false, true));
 // Values recovered from QuartzCore (+defaultValues / GlassBackgroundFilter::render):
 // displacement height 20 + curvature 1, refraction height 30, highlight
 // angle pi/2 spread pi amount 0.5, key/fill amounts 0.5, shadow radius 10 offset {0,-10}.
@@ -589,17 +601,16 @@ const MACOS = {
   squircle: true, band: 20, refract: 30, curv: 1,
   light: 90, spread: 180, hlAmt: 0.5, fill: 0.5,
   shRad: 10, shOffX: 0, shOffY: -10,
-  qAngle: 0, ...QC_REGULAR,
+  qAngle: 0,
 };
 const state = Object.assign({}, DEFAULTS);
 // ?key=value overrides for any param (e.g. ?qc=1&follow=0) — handy for testing.
-// qClear/qDark swap the whole recipe first, then the remaining overrides apply.
+// qClear/qDark/qActive/w/h pick the recipe first, then the remaining overrides apply.
 const params = new URLSearchParams(location.search);
-if (params.get('qDark') === 'true' || params.get('qDark') === '1') Object.assign(state, QC_DARK);
-else if (params.get('qClear') === 'true' || params.get('qClear') === '1') Object.assign(state, QC_CLEAR);
-for (const [k, v] of params)
-  if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : isNaN(+v) ? v : +v;
-const pos = { x: 0, y: 0 }, target = { x: 0, y: 0 };   // CSS px, y down
+const applyParams = () => { for (const [k, v] of params)
+  if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : isNaN(+v) ? v : +v; };
+applyParams(); applyRecipe(state); applyParams();
+const pos = { x: 0, y: 0 }, target = { x: 0, y: 0 }, vel = { x: 0, y: 0 };   // CSS px, y down
 
 const analytic = () => !state.qc, quartz = () => state.qc;
 const SCHEMA = [
@@ -610,7 +621,8 @@ const SCHEMA = [
   ['squircle', 'Squircle', 'toggle'],
   ['exp', 'Corner smoothing', 2, 10, 0.1, () => state.squircle],
   ['follow', 'Follow cursor', 'toggle'],
-  ['followSpeed', 'Follow speed', 0.02, 1, 0.01, () => state.follow],
+  ['followResponse', 'Follow response', 0.05, 1, 0.01, () => state.follow],
+  ['followDamping', 'Follow damping', 0.2, 1, 0.01, () => state.follow],
   ['Shader'],
   ['qc', 'QuartzCore port', 'toggle'],
   ['Refraction', analytic],
@@ -638,6 +650,8 @@ const SCHEMA = [
   ['qClear', 'Clear glass', 'toggle'],
   ['qDark', 'Dark mode', 'toggle'],
   ['qRimHl', 'Rim highlight', 'toggle'],
+  ['qActive', 'Window focused', 'toggle'],
+  ['qSized', 'Size-driven amounts', 'toggle'],
   ['Refraction', quartz],
   ['qAngle', 'Angle', -180, 180, 1],
   ['qInnerAmount', 'Inner amount', -150, 150, 0.5],
@@ -656,6 +670,7 @@ const SCHEMA = [
   ['qFaceWhite', 'White', 0.5, 1.5, 0.005],
   ['qFaceSat', 'Saturation', 0, 2, 0.01],
   ['qFill', 'White fill', 0, 1, 0.01],
+  ['qClamp', 'Clamp', 0, 2, 0.001],
   ['Shadow', quartz],
   ['qShadowOpacity', 'Opacity', 0, 1, 0.01],
   ['qShadowBlur', 'Blur radius', 0, 120, 1],
@@ -692,9 +707,9 @@ for (const item of SCHEMA) {
     row.appendChild(btn); body.appendChild(row);
     btn.onclick = () => {
       state[k] = !state[k];
-      if (k === 'qClear' || k === 'qDark') {
-        if (state[k]) { state.qClear = state.qDark = false; state[k] = true; }   // variants are exclusive
-        Object.assign(state, state.qDark ? QC_DARK : state.qClear ? QC_CLEAR : QC_REGULAR);
+      if (k === 'qClear' || k === 'qDark' || k === 'qActive' || (k === 'qSized' && state.qSized)) {
+        if (state[k] && (k === 'qClear' || k === 'qDark')) { state.qClear = state.qDark = false; state[k] = true; }   // variants are exclusive
+        applyRecipe(state);
       }
       sync();
     };
@@ -710,7 +725,11 @@ for (const item of SCHEMA) {
     controls.push({ k, row, visible, sync: () => { input.value = state[k]; } });
   } else {
     Object.assign(input, { type: 'range', min: a, max: b, step });
-    input.oninput = () => { state[k] = +input.value; val.textContent = fmt(state[k], step); };
+    input.oninput = () => {
+      state[k] = +input.value;
+      if ((k === 'w' || k === 'h') && state.qSized) { applyRecipe(state); sync(); }
+      else val.textContent = fmt(state[k], step);
+    };
     controls.push({ k, row, visible, sync: () => { input.value = state[k]; val.textContent = fmt(state[k], step); } });
   }
   row.appendChild(input); body.appendChild(row);
@@ -728,7 +747,7 @@ const copyBtn = mkBtn('Copy JSON', () => {
 });
 presets.append(
   mkBtn('Reset', () => { Object.assign(state, DEFAULTS); sync(); }),
-  mkBtn('macOS', () => { Object.assign(state, MACOS); sync(); }),
+  mkBtn('macOS', () => { Object.assign(state, MACOS); applyRecipe(state); sync(); }),
   copyBtn);
 const walls = el('div', 'btns');
 const wallBtn = mkBtn('', () => step(1));
@@ -785,9 +804,14 @@ function frame(now){
   const W = canvas.width, H = canvas.height;
   const dt = Math.min((now - last) / 1000, 0.05); last = now;
   if (state.follow) {
-    const k = 1 - Math.pow(1 - state.followSpeed, dt * 60);
-    pos.x += (target.x - pos.x) * k; pos.y += (target.y - pos.y) * k;
-  }
+    // SwiftUI .interactiveSpring() by default (response 0.15 s, damping 0.85):
+    // k = (2pi / response)^2, c = 2 damping sqrt(k), mass 1, in 1/480 s steps.
+    const w0 = 2 * Math.PI / state.followResponse, k = w0 * w0, c = 2 * state.followDamping * w0;
+    for (let n = Math.ceil(dt * 480), h = dt / n; n > 0; n--) {
+      vel.x += (k * (target.x - pos.x) - c * vel.x) * h; vel.y += (k * (target.y - pos.y) - c * vel.y) * h;
+      pos.x += vel.x * h; pos.y += vel.y * h;
+    }
+  } else vel.x = vel.y = 0;
   const ca = W / H;
   const cover = ca > imgAspect ? [1, imgAspect / ca] : [ca / imgAspect, 1];
 
@@ -900,11 +924,12 @@ function drawQC(W, H, cover){
   // "spec" is the BlurOpacity deltas, so the remap lerps an opacity curve over
   // the blur radius; it never reaches lod 0 at the rim.
   const X = QC_FIXED, S = 1.6 * dpr, inv = v => v > 0 ? 1 / v : 0, sat01 = v => Math.min(Math.max(v, 0), 1);
-  const op = X.blurOpacity, cm = (n, c) => { m3(n + 'M', c.m); f(n + 'Bias', ...c.b); };
+  const op = state.qBlurOpacity, cm = (n, c) => { m3(n + 'M', c.m); f(n + 'Bias', ...c.b); };
   f('uBG.caAmount1', state.qInnerAmount); f('uBG.caEdge1', inv(state.qInnerHeight));
   f('uBG.caAmount2', state.qOuterAmount); f('uBG.caEdge2', inv(state.qOuterHeight));
   f('uBG.caMixLo', X.refrDist[0]); f('uBG.caMixHi', X.refrDist[1]); f('uBG.caMixAmount', state.qRefrOpacity);
   f('uMaxLod', back.levels - 1);
+  f('uMinLod', Math.min(Math.log2(1 / state.qCaptureScale), back.levels - 1));
   f('uBG.mipLodScale1', S * state.qBlur);
   f('uBG.mipLodScale3', state.qBleedOpacity > 0 ? S * 0.5 * state.qBleedBlur : 0);
   f('uBG.blurMip', state.qShadowOpacity > 0 ? S * 0.5 * state.qShadowBlur : 0);
@@ -920,12 +945,12 @@ function drawQC(W, H, cover){
   cm('uBG.tint', ycc(sb, sw, ss, [0, 0, 0, sa]));
   // SDR: headroom fraction h = 0, so holding tone is fully on and the SDR
   // shadow opacity adds straight onto the shadow fill alpha.
-  f('uBG.tintAmount', state.qShadowVibrancy); f('uBG.tintAlpha', sa + X.sdrShadowOpacity);
-  f('uBG.lensAmount', X.shadowAmount); f('uBG.lensEdge', inv(X.shadowHeight)); f('uBG.lensBase', 0);
+  f('uBG.tintAmount', state.qShadowVibrancy); f('uBG.tintAlpha', sa + state.qSdrHold * X.sdrShadowOpacity);
+  f('uBG.lensAmount', X.shadowAmount); f('uBG.lensEdge', inv(state.qShadowHeight)); f('uBG.lensBase', 0);
   f('uBG.lensScale', sat01(state.qShadowOpacity)); f('uBG.profileScale', inv(X.shadowRadius));
   f('uBG.bleedUV', ...X.shadowOffset);   // sdfTex() takes pt, y up
-  f('uBG.fadeAmount', 1); f('uBG.fadeLo', X.sdrDist[0]); f('uBG.fadeHi', X.sdrDist[1]); f('uBG.fadeScale', X.sdrWhite);
-  f('uBG.hdrClampMax', 0); f('uBG.premulClamp', 0);
+  f('uBG.fadeAmount', state.qSdrHold); f('uBG.fadeLo', X.sdrDist[0]); f('uBG.fadeHi', X.sdrDist[1]); f('uBG.fadeScale', X.sdrWhite);
+  f('uBG.hdrClampMax', state.qClamp); f('uBG.premulClamp', 0);   // inputClamp, ClampPreserveHue off
   // CASDFKeyFillHighlightEffect (sibling layer): key -45 deg, fill +135 deg,
   // spreads 160 deg, amounts 0.5, heights 1pt, curvature 0.7, white.
   f('uRimHl', state.qRimHl ? 1 : 0); f('uRimHlH', 1); f('uRimHlCurv', 0.7);
