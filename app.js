@@ -465,7 +465,7 @@ Object.assign(DEFAULTS, { qSized: true, qTinted: true }, qcRecipe(Math.min(DEFAU
 // displacement height 20 + curvature 1, refraction height 30, highlight
 // angle pi/2 spread pi amount 0.5, key/fill amounts 0.5, shadow radius 10 offset {0,-10}.
 // Continuous (squircle) corners are what CALayer uses for glass.
-const MACOS = { squircle: true, exp: 3, qAngle: 0, qClear: false, qDark: false, qActive: true };
+const MACOS = { squircle: true, exp: 3, qAngle: 0, qClear: false, qDark: false, qActive: true, qTinted: true };
 const state = Object.assign({}, DEFAULTS);
 // ?key=value overrides for any param (e.g. ?qDark=1&follow=0) — handy for testing.
 // qClear/qDark/qActive/w/h pick the recipe first, then the remaining overrides apply.
@@ -542,7 +542,11 @@ for (const item of SCHEMA) {
     row.appendChild(btn); body.appendChild(row);
     btn.onclick = () => {
       state[k] = !state[k];
-      if (k === 'qClear' || k === 'qDark' || k === 'qActive' || (k === 'qSized' && state.qSized) || k === 'qTinted') {
+      if (k === 'qTinted') {
+        // Tint only swaps the face matrix; leave manual slider tweaks alone.
+        const f = qcRecipe(Math.min(state.w, state.h), state.qClear, state.qDark, state.qActive, state.qTinted);
+        for (const key of ['qFaceBlack', 'qFaceWhite', 'qFaceSat', 'qFill', 'qFillRgb']) state[key] = f[key];
+      } else if (k === 'qClear' || k === 'qDark' || k === 'qActive' || (k === 'qSized' && state.qSized)) {
         if (state[k] && (k === 'qClear' || k === 'qDark')) { state.qClear = state.qDark = false; state[k] = true; }   // variants are exclusive
         applyRecipe(state);
       }
