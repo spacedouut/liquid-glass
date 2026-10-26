@@ -32,10 +32,24 @@ first port look bad, now fixed:
   the rim) and its glow came out as 7x alpha, which blew everything out white
 - the CPU-baked SDF had its y gradient flipped relative to the backdrop uvs
 
-Values that aren't recovered (spectral knots/weights, rim matrix, inner
-refraction pair) are guesses and are labeled as sliders. "Blur at rim" is one
-of those: it sets how much of the center blur survives the knot remap at the
-edge, and the foreground pass's taps use the same lod.
+The uniforms now come from macOS 26.6 itself: the formulas from
+`CA::OGL::GlassBackgroundFilter::render`, and the inputs AppKit sets on a live
+`NSGlassEffectView` (regular and clear, light mode). "Clear glass" switches
+between the two recipes, and the sliders are the real CAFilter inputs. A few
+things that turned out different from the old guesses:
+
+- the "knots" are BlurDistance0..3 and the "spectral weights" are the deltas
+  between BlurOpacity0..3, so the remap just scales the blur radius by an
+  opacity curve. It dips a bit near the edge but never reaches 0, so the rim
+  stays blurred
+- blur radii are `1.6 x input x backing scale`, in pixels
+- no standard glass on macOS 26 creates a `glassForeground` filter, so the
+  foreground pass is off by default. When it does run, it reads level 0 of its
+  input
+- the face/bleed/shadow color matrices are `set_ycc_composite` (luma remap
+  into [black, white], saturate, composite under the fill), rebuilt in `ycc()`
+
+Still missing: dark-mode values and the HDR clamp limit (left off).
 
 All lengths are in points. "macOS" applies the recovered values: displacement
 height 20, curvature 1, refraction 30, highlight angle 90° / spread 180° /
