@@ -215,6 +215,10 @@ uniform vec2  uRes, uCenter;
 uniform float uDpr;
 uniform float uShadow, uShRad;
 uniform vec2  uShOff;
+// Sibling CASDFLayer rim highlight (CASDFKeyFillHighlightEffect): it is NOT
+// part of glass_background_lpf — CA draws it in a separate layer on top.
+uniform float uRimHl, uRimHlH, uRimHlCurv, uRimHlSpread;
+uniform vec2  uRimHlKey, uRimHlFill;
 ${SDF_GLSL}
 out vec4 frag;
 
@@ -383,6 +387,18 @@ void main(){
   vec4 bg = glassBackground(uv0, q);
   c = bg.rgb + c * (1.0 - bg.a);
   if (uFgOn) { vec4 fg = glassForeground(uv0, q); c = fg.rgb + c * (1.0 - fg.a); }
+  // Rim highlight: a crisp 1-2px white line just inside the edge, two 160 deg
+  // cones (key at -45 deg lighting the down-right rim, fill at +135 deg
+  // up-left), heights 1pt, curvature 0.7. vibrantColorMatrix keeps it white.
+  if (uRimHl > 0.0) {
+    vec4 th = sdfTex(q);
+    float sh = clamp(-th.x / max(uRimHlH, 1e-3), 0.0, 1.0);
+    float band = (1.0 - mix(sh, sqrt(sh * (2.0 - sh)), uRimHlCurv)) * step(th.x, 0.0);
+    float half_ = 0.5 * uRimHlSpread;
+    float key = max(cos(min(acos(clamp(dot(th.yz, uRimHlKey), -1.0, 1.0)) / half_, 1.0) * 1.5707963), 0.0);
+    float fil = max(cos(min(acos(clamp(dot(th.yz, uRimHlFill), -1.0, 1.0)) / half_, 1.0) * 1.5707963), 0.0);
+    c = mix(c, vec3(1.0), clamp(band * uRimHl * 0.5 * (key + fil), 0.0, 1.0));
+  }
   // Dither: RGBA8 banding shows on smooth gradients otherwise.
   c += (fract(sin(dot(px, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
   frag = vec4(c, 1.0);
@@ -449,6 +465,10 @@ function ensureBack(W, H, cover){
   if (back.w !== W || back.h !== H) {
     back.w = W; back.h = H; back.dirty = true;
     back.levels = Math.floor(Math.log2(Math.max(W, H))) + 1;
+    // texStorage2D is one-shot per texture object: resize = fresh texture.
+    // The FBO keeps the old one alive until the loop reattaches each level.
+    gl.deleteTexture(back.t);
+    back.t = tex();
     gl.bindTexture(gl.TEXTURE_2D, back.t);
     gl.texStorage2D(gl.TEXTURE_2D, back.levels, backFmt, W, H);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
@@ -522,7 +542,7 @@ const DEFAULTS = {
   bright: 1.04, tint: '#ffffff', tintAmt: 0,
   shadow: 0.22, shRad: 18, shOffX: 0, shOffY: -8,
   qc: false,
-  qAngle: 0, qDark: false, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
+  qAngle: 0, qDark: false, qRimHl: true, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
 };
 // glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6, light
 // mode), read live off the CABackdropLayer's CAFilter. Color matrices are
@@ -617,6 +637,7 @@ const SCHEMA = [
   ['Variant', quartz],
   ['qClear', 'Clear glass', 'toggle'],
   ['qDark', 'Dark mode', 'toggle'],
+  ['qRimHl', 'Rim highlight', 'toggle'],
   ['Refraction', quartz],
   ['qAngle', 'Angle', -180, 180, 1],
   ['qInnerAmount', 'Inner amount', -150, 150, 0.5],
@@ -671,7 +692,10 @@ for (const item of SCHEMA) {
     row.appendChild(btn); body.appendChild(row);
     btn.onclick = () => {
       state[k] = !state[k];
-      if (k === 'qClear' || k === 'qDark') Object.assign(state, state.qDark ? QC_DARK : state.qClear ? QC_CLEAR : QC_REGULAR);
+      if (k === 'qClear' || k === 'qDark') {
+        if (state[k]) { state.qClear = state.qDark = false; state[k] = true; }   // variants are exclusive
+        Object.assign(state, state.qDark ? QC_DARK : state.qClear ? QC_CLEAR : QC_REGULAR);
+      }
       sync();
     };
     controls.push({ k, row, visible, sync: () => { btn.textContent = `${label}: ${state[k] ? 'on' : 'off'}`; btn.classList.toggle('on', state[k]); } });
@@ -857,7 +881,11 @@ function drawQC(W, H, cover){
   gl.uniform1i(u.srcTex, 0);
   f('uRes', W, H); f('uDpr', dpr); f('uCenter', pos.x * dpr, H - pos.y * dpr);
   const hw = state.w / 2, hh = state.h / 2;
-  f('uHalf', hw, hh); f('uRadius', Math.min(state.radius, hw, hh)); f('uExp', state.squircle ? state.exp : 2);
+  // CASDFElementLayer's continuous corner isn't our superellipse: r56
+  // continuous measures as radius*1.375 at exp 3 (0.3pt RMS fit).
+  f('uHalf', hw, hh);
+  f('uRadius', Math.min(state.radius * (state.squircle ? 1.375 : 1), hw, hh));
+  f('uExp', state.squircle ? 3 : 2);
   f('uShadow', 0);   // the glass's own shadow term (tint) draws it
   f('globalAlpha', 1);
   gl.uniform1i(u.uFgOn, state.qFgOn ? 1 : 0);
@@ -898,6 +926,11 @@ function drawQC(W, H, cover){
   f('uBG.bleedUV', ...X.shadowOffset);   // sdfTex() takes pt, y up
   f('uBG.fadeAmount', 1); f('uBG.fadeLo', X.sdrDist[0]); f('uBG.fadeHi', X.sdrDist[1]); f('uBG.fadeScale', X.sdrWhite);
   f('uBG.hdrClampMax', 0); f('uBG.premulClamp', 0);
+  // CASDFKeyFillHighlightEffect (sibling layer): key -45 deg, fill +135 deg,
+  // spreads 160 deg, amounts 0.5, heights 1pt, curvature 0.7, white.
+  f('uRimHl', state.qRimHl ? 1 : 0); f('uRimHlH', 1); f('uRimHlCurv', 0.7);
+  f('uRimHlSpread', 160 * Math.PI / 180);
+  f('uRimHlKey', Math.SQRT1_2, -Math.SQRT1_2); f('uRimHlFill', -Math.SQRT1_2, Math.SQRT1_2);
 
   // No standard macOS 26 glass instantiates glassForeground; these stay knobs.
   const c = 1, s = 0;
