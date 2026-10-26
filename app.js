@@ -450,7 +450,8 @@ function qcRecipe(S, clear, dark, active, tinted){
     qBleedBlur: 0, qBleedOpacity: 0, qShadowOpacity: 0, qShadowBlur: 0, qShadowVibrancy: 0,
     qSdrHold: 0, qClamp: 1,
   }, clear ? { qBlur: 10, qFaceBlack: dark ? 0.05 : 0.2, qFaceWhite: dark ? 0.8 : 0.95, qFaceSat: 1, qFill: dark ? 0.05 : 0.1 }
-           : { qFaceWhite: dark ? 0.6 : 0.95, qFill: 0.35 });
+           : tinted ? { qFaceBlack: dark ? 0.4 : 0.25, qFaceWhite: 0.75, qFaceSat: 2, qFill: dark ? 0.6 : 0.8 }
+                    : { qFaceWhite: dark ? 0.6 : 0.95, qFill: 0.35 });
   return r;
 }
 // Same for every variant.
