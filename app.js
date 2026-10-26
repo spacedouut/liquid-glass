@@ -47,6 +47,27 @@ void main(){
   O = vec4(c / sum, 1.0);
 }`;
 
+// Half-res downsample for the QC backdrop pyramid. A gaussian (sigma ~1 src px,
+// 6x6 texel footprint) built from 3x3 bilinear taps: the center tap sits on a
+// texel corner so it averages the 2x2 block under the dest pixel, the side taps
+// at ±1.62 px blend texels 1.5/2.5 out with gaussian weights. generateMipmap's
+// 2x2 box let stripes alias into the coarse levels (moiré under the glass).
+const DOWN_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform vec2 uSrcRes;
+out vec4 O;
+const float T = 1.619, WC = 0.7054, WS = 0.1473;
+void main(){
+  vec2 h = T / uSrcRes, uv = gl_FragCoord.xy * 2.0 / uSrcRes;
+  vec4 c = texture(uSrc, uv) * (WC * WC)
+         + (texture(uSrc, uv + vec2(-h.x, 0.0)) + texture(uSrc, uv + vec2(h.x, 0.0))
+         +  texture(uSrc, uv + vec2(0.0, -h.y)) + texture(uSrc, uv + vec2(0.0, h.y))) * (WC * WS)
+         + (texture(uSrc, uv + vec2(-h.x, -h.y)) + texture(uSrc, uv + vec2(-h.x, h.y))
+         +  texture(uSrc, uv + vec2( h.x, -h.y)) + texture(uSrc, uv + vec2( h.x, h.y))) * (WS * WS);
+  O = c;
+}`;
+
 // Rounded rect in pt (negative inside); uExp 2 = circular corners, >2 = squircle.
 const SDF_GLSL = `
 uniform vec2  uHalf;
@@ -189,6 +210,7 @@ uniform GlassForegroundUniforms uFG;
 uniform bool uFgOn;
 uniform float globalAlpha;
 uniform sampler2D srcTex;
+uniform float uMaxLod;
 uniform vec2  uRes, uCenter;
 uniform float uDpr;
 uniform float uShadow, uShRad;
@@ -219,7 +241,29 @@ float lensProfile(float x){
   r = r * q2 + 0.168213; r = r * q2 - 0.560547; r = r * q + 0.5;
   return r;
 }
-vec4 smp(vec2 uv, float lod){ return textureLod(srcTex, uv, lod); }
+// Reading a coarse mip with plain bilinear shows the level's texel grid once
+// it's magnified 4x+ (the "pixelated" blur). Levels >= 1 go through a cubic
+// B-spline reconstruction instead (4 bilinear taps, Sigg & Hadwiger), and the
+// two bracketing levels are mixed by hand since textureLod can't do that.
+vec4 smpLevel(vec2 uv, float lvl){
+  if (lvl < 0.5) return textureLod(srcTex, uv, 0.0);
+  vec2 res = vec2(textureSize(srcTex, int(lvl)));
+  vec2 p = uv * res - 0.5, f = fract(p), i = p - f;
+  vec2 f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  vec2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  vec2 w3 = f3 / 6.0;
+  vec2 s0 = w0 + w1, s1 = 1.0 - s0;
+  vec2 t0 = (i - 0.5 + w1 / s0) / res, t1 = (i + 1.5 + w3 / s1) / res;
+  return (textureLod(srcTex, t0, lvl) * s0.x + textureLod(srcTex, vec2(t1.x, t0.y), lvl) * s1.x) * s0.y
+       + (textureLod(srcTex, vec2(t0.x, t1.y), lvl) * s0.x + textureLod(srcTex, t1, lvl) * s1.x) * s1.y;
+}
+vec4 smp(vec2 uv, float lod){
+  lod = clamp(lod, 0.0, uMaxLod);
+  float l0 = floor(lod), t = lod - l0;
+  vec4 a = smpLevel(uv, l0);
+  return t > 0.0 ? mix(a, smpLevel(uv, l0 + 1.0), t) : a;
+}
 
 vec4 glassBackground(vec2 uv0, vec2 q){
   vec4 t = sdfTex(q);
@@ -247,15 +291,17 @@ vec4 glassBackground(vec2 uv0, vec2 q){
   if (cov > 0.0) {
     vec4 s;
     if (uBG.chromaEnable != 0.0) {
-      vec3 lo = uBG.knots.xyz, hi = uBG.knots.yzw;
+      // dist2 == dist3 in the real recipe: that segment is 0/0, which Metal's
+      // fast saturate turns into 0. GLSL clamp(NaN) is undefined, so guard it.
+      vec3 lo = uBG.knots.xyz, hi = uBG.knots.yzw, seg = vec3(notEqual(hi, lo));
       float eA = edgeOffset(d, 0.0, uBG.caEdge1, uBG.caAmount1);
-      vec3 spA = clamp((vec3(eA + d) - lo) / (hi - lo), 0.0, 1.0);
+      vec3 spA = seg * clamp((vec3(eA + d) - lo) / (hi - lo + 1.0 - seg), 0.0, 1.0);
       float lodA = (uBG.caLumaBias - dot(spA, uBG.spec)) * uBG.mipLodScale1;
       vec4 sA = smp(uv0 + eA * grad, mipLod(lodA));
       sA = vec4(killTiny(sA.rgb), sA.a);
       if (uBG.caMixAmount > 0.0) {
         float eB = edgeOffset(d, 0.0, uBG.caEdge2, uBG.caAmount2);
-        vec3 spB = clamp((vec3(eB + d) - lo) / (hi - lo), 0.0, 1.0);
+        vec3 spB = seg * clamp((vec3(eB + d) - lo) / (hi - lo + 1.0 - seg), 0.0, 1.0);
         float lodB = (uBG.caLumaBias - dot(spB, uBG.spec)) * uBG.mipLodScale1;
         vec4 sB = smp(uv0 + eB * grad, mipLod(lodB));
         sB = vec4(killTiny(sB.rgb), sB.a);
@@ -308,15 +354,16 @@ vec4 glassForeground(vec2 uv0, vec2 q){
   vec2 base = uv0 + edgeOffset(d, uFG.rimBase1, uFG.rimEdge1, uFG.rimAmount1) * dirA;
   vec2 stp  = edgeOffset(d, uFG.rimBase2, uFG.rimEdge2, uFG.rimAmount2) * dirB;
   vec4 acc = vec4(0.0);
+  // CA binds the fg source with mipmapping off and no lod: always level 0.
   float k = 1.0;
   for (int i = 0; i < 3; i++) {
-    vec4 s = smp(base + k * stp, 0.0);
+    vec4 s = textureLod(srcTex, base + k * stp, 0.0);
     vec2 rg = s.rg / max(s.a, EPS);
     acc.x += rg.x * k; acc.y += rg.y * (1.0 - k); acc.a += s.a; k -= 1.0 / 3.0;
   }
   k = 0.0;
   for (int i = 0; i < 4; i++) {
-    vec4 s = smp(base - k * stp, 0.0);
+    vec4 s = textureLod(srcTex, base - k * stp, 0.0);
     vec2 gb = s.gb / max(s.a, EPS);
     acc.y += gb.x * (1.0 - k); acc.z += gb.y * k; acc.a += s.a; k += 1.0 / 3.0;
   }
@@ -336,6 +383,8 @@ void main(){
   vec4 bg = glassBackground(uv0, q);
   c = bg.rgb + c * (1.0 - bg.a);
   if (uFgOn) { vec4 fg = glassForeground(uv0, q); c = fg.rgb + c * (1.0 - fg.a); }
+  // Dither: RGBA8 banding shows on smooth gradients otherwise.
+  c += (fract(sin(dot(px, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
   frag = vec4(c, 1.0);
 }`;
 
@@ -356,7 +405,7 @@ function program(fs){
   for (let i = 0; i < n; i++) { const a = gl.getActiveUniform(p, i); u[a.name] = gl.getUniformLocation(p, a.name); }
   return { p, u };
 }
-const pCover = program(COVER_FS), pBlur = program(BLUR_FS), pGlass = program(GLASS_FS), pQC = program(QC_FS);
+const pCover = program(COVER_FS), pBlur = program(BLUR_FS), pDown = program(DOWN_FS), pGlass = program(GLASS_FS), pQC = program(QC_FS);
 
 gl.bindVertexArray(gl.createVertexArray());
 gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
@@ -389,19 +438,25 @@ function ensureRT(w, h){
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
-const back = { t: tex(), f: gl.createFramebuffer(), w: 0, h: 0, dirty: true };
+// Screen-space backdrop the QC shaders sample: a real mip chain (immutable
+// storage), each level rendered with DOWN_FS rather than generateMipmap so
+// the pyramid is properly band-limited.
+const back = { t: tex(), f: gl.createFramebuffer(), w: 0, h: 0, levels: 1, dirty: true };
+// fp16 keeps the pyramid from banding on smooth gradients (8-bit mips read as
+// blocky when magnified); RGBA8 fallback where color-buffer-float is missing.
+const backFmt = gl.getExtension('EXT_color_buffer_float') ? gl.RGBA16F : gl.RGBA8;
 function ensureBack(W, H, cover){
   if (back.w !== W || back.h !== H) {
     back.w = W; back.h = H; back.dirty = true;
+    back.levels = Math.floor(Math.log2(Math.max(W, H))) + 1;
     gl.bindTexture(gl.TEXTURE_2D, back.t);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texStorage2D(gl.TEXTURE_2D, back.levels, backFmt, W, H);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, back.f);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, back.t, 0);
   }
   if (!back.dirty) return;
   back.dirty = false;
   gl.bindFramebuffer(gl.FRAMEBUFFER, back.f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, back.t, 0);
   gl.viewport(0, 0, W, H);
   gl.useProgram(pCover.p);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, imgTex);
@@ -409,9 +464,25 @@ function ensureBack(W, H, cover){
   gl.uniform2f(pCover.u.uRes, W, H);
   gl.uniform2f(pCover.u.uCover, cover[0], cover[1]);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  // Fill each mip level from the previous one. Narrowing BASE/MAX_LEVEL to the
+  // source level keeps this legal (no feedback loop) while reusing one texture.
   gl.bindTexture(gl.TEXTURE_2D, back.t);
-  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.useProgram(pDown.p);
+  gl.uniform1i(pDown.u.uSrc, 0);
+  let sw = W, sh = H;
+  for (let i = 1; i < back.levels; i++) {
+    const w = Math.max(1, W >> i), h = Math.max(1, H >> i);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, i - 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, i - 1);
+    gl.uniform2f(pDown.u.uSrcRes, sw, sh);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, back.t, i);
+    gl.viewport(0, 0, w, h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    sw = w; sh = h;
+  }
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, back.levels - 1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
 // ---- wallpapers --------------------------------------------------------------
@@ -451,11 +522,45 @@ const DEFAULTS = {
   bright: 1.04, tint: '#ffffff', tintAmt: 0,
   shadow: 0.22, shRad: 18, shOffX: 0, shOffY: -8,
   qc: false,
-  qAngle: 0, qAmount: 30, qHeight: 20, qAmount2: 15, qHeight2: 10, qMix: 0.5, qBlur: 4,
-  qRimAmount: 8, qRimHeight: 3, qRimBlur: 1, qRimStrength: 6, qRimBright: 1.3, qSpec: 0.75,
-  qSat: 1, qFaceBright: 1,
-  qFgOn: true, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
+  qAngle: 0, qDark: false, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
 };
+// glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6, light
+// mode), read live off the CABackdropLayer's CAFilter. Color matrices are
+// [black, white, saturation(, fill alpha)] fed through set_ycc_composite.
+// Not covered: dark mode, and the HDR clamp (left off).
+const QC_REGULAR = {
+  qClear: false, qDark: false, qBlur: 4, blurDist: [-100, -1, 0, 0],
+  qInnerAmount: -60, qInnerHeight: 20, qOuterAmount: 40, qOuterHeight: 25, qRefrOpacity: 0.3,
+  qBleedAmount: 70, qBleedHeight: 70, qBleedBlur: 140, qBleedOpacity: 0.5, qBleedDarken: 1,
+  qFaceBlack: 0.5, qFaceWhite: 1.03, qFaceSat: 1, qFill: 0.4, qFillRgb: 1,
+  qShadowOpacity: 0.25, qShadowBlur: 40, qShadowVibrancy: 1,
+  qBleedCM: [0.9, 1, 1.2], qShadowCM: [0, 1, 1.8, 0.12],
+};
+// Same NSGlassEffectView in dark mode: amounts and blur distances grow ~10%,
+// the face flips to a dark tint (black fill, luma remap to [0.2, 0.6]) and the
+// bleed goes additive (darken off).
+const QC_DARK = {
+  ...QC_REGULAR, qDark: true, blurDist: [-110, -1, 0, 0],
+  qOuterAmount: 44, qOuterHeight: 27.5,
+  qBleedAmount: 77, qBleedHeight: 77, qBleedBlur: 154, qBleedOpacity: 0.8, qBleedDarken: 0,
+  qFaceBlack: 0.2, qFaceWhite: 0.6, qFaceSat: 1, qFill: 0.4, qFillRgb: 0,
+  qBleedCM: [0, 0.5, 1], qShadowCM: [0, 0.5, 1, 0],
+};
+const QC_CLEAR = {
+  ...QC_REGULAR, qClear: true, qBlur: 1, qRefrOpacity: 0,
+  qBleedAmount: 0, qBleedHeight: 0, qBleedBlur: 0, qBleedOpacity: 0,
+  qFaceBlack: 0.075, qFaceWhite: 1.15, qFaceSat: 1.06, qFill: 0, qFillRgb: 1,
+  qShadowOpacity: 0, qShadowBlur: 0, qShadowVibrancy: 0,
+  qBleedCM: [0.75, 1, 1.2], qShadowCM: [0, 1, 1.2, 0.1],
+};
+// Same for both variants.
+const QC_FIXED = {
+  blurOpacity: [1, 0.5, 0.5, 1],
+  refrDist: [-1, 0], bleedDist: [1, 0],
+  shadowAmount: 75, shadowHeight: 80, shadowRadius: 24, shadowOffset: [0, 8],
+  sdrDist: [-2, -1], sdrWhite: 0.97, sdrShadowOpacity: 0.24,
+};
+Object.assign(DEFAULTS, QC_REGULAR);
 // Values recovered from QuartzCore (+defaultValues / GlassBackgroundFilter::render):
 // displacement height 20 + curvature 1, refraction height 30, highlight
 // angle pi/2 spread pi amount 0.5, key/fill amounts 0.5, shadow radius 10 offset {0,-10}.
@@ -464,9 +569,16 @@ const MACOS = {
   squircle: true, band: 20, refract: 30, curv: 1,
   light: 90, spread: 180, hlAmt: 0.5, fill: 0.5,
   shRad: 10, shOffX: 0, shOffY: -10,
-  qAngle: 0, qHeight: 20, qAmount: 30, qSpec: 0.75,
+  qAngle: 0, ...QC_REGULAR,
 };
 const state = Object.assign({}, DEFAULTS);
+// ?key=value overrides for any param (e.g. ?qc=1&follow=0) — handy for testing.
+// qClear/qDark swap the whole recipe first, then the remaining overrides apply.
+const params = new URLSearchParams(location.search);
+if (params.get('qDark') === 'true' || params.get('qDark') === '1') Object.assign(state, QC_DARK);
+else if (params.get('qClear') === 'true' || params.get('qClear') === '1') Object.assign(state, QC_CLEAR);
+for (const [k, v] of params)
+  if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : isNaN(+v) ? v : +v;
 const pos = { x: 0, y: 0 }, target = { x: 0, y: 0 };   // CSS px, y down
 
 const analytic = () => !state.qc, quartz = () => state.qc;
@@ -502,30 +614,36 @@ const SCHEMA = [
   ['bright', 'Brightness', 0.5, 1.6, 0.01],
   ['tintAmt', 'Tint', 0, 1, 0.01],
   ['tint', 'Tint color', 'color'],
+  ['Variant', quartz],
+  ['qClear', 'Clear glass', 'toggle'],
+  ['qDark', 'Dark mode', 'toggle'],
   ['Refraction', quartz],
   ['qAngle', 'Angle', -180, 180, 1],
-  ['qAmount', 'Amount', 0, 150, 0.5],
-  ['qHeight', 'Height', 1, 200, 0.5],
-  ['qAmount2', 'Inner amount', 0, 150, 0.5],
-  ['qHeight2', 'Inner height', 1, 200, 0.5],
-  ['qMix', 'Inner mix', 0, 1, 0.01],
-  ['qBlur', 'Blur (mip)', 0, 64, 0.5],
-  ['Rim', quartz],
-  ['qRimAmount', 'Offset', 0, 60, 0.5],
-  ['qRimHeight', 'Height', 0.5, 40, 0.5],
-  ['qRimBlur', 'Blur (mip)', 0, 32, 0.5],
-  ['qRimStrength', 'Strength', 0, 40, 0.1],
-  ['qRimBright', 'Brightness', 0.5, 3, 0.01],
-  ['qSpec', 'Specular gain', 0, 2, 0.01],
-  ['Grade', quartz],
-  ['qSat', 'Saturation', 0, 2, 0.01],
-  ['qFaceBright', 'Brightness', 0.5, 1.6, 0.01],
+  ['qInnerAmount', 'Inner amount', -150, 150, 0.5],
+  ['qInnerHeight', 'Inner height', 1, 200, 0.5],
+  ['qOuterAmount', 'Outer amount', -150, 150, 0.5],
+  ['qOuterHeight', 'Outer height', 1, 200, 0.5],
+  ['qRefrOpacity', 'Outer mix', 0, 1, 0.01],
+  ['qBlur', 'Blur radius', 0, 30, 0.1],
+  ['Bleed', quartz],
+  ['qBleedAmount', 'Offset', 0, 200, 0.5],
+  ['qBleedHeight', 'Height', 0, 200, 0.5],
+  ['qBleedBlur', 'Blur radius', 0, 300, 1],
+  ['qBleedOpacity', 'Opacity', 0, 1, 0.01],
+  ['Face', quartz],
+  ['qFaceBlack', 'Black', 0, 1, 0.005],
+  ['qFaceWhite', 'White', 0.5, 1.5, 0.005],
+  ['qFaceSat', 'Saturation', 0, 2, 0.01],
+  ['qFill', 'White fill', 0, 1, 0.01],
+  ['Shadow', quartz],
+  ['qShadowOpacity', 'Opacity', 0, 1, 0.01],
+  ['qShadowBlur', 'Blur radius', 0, 120, 1],
   ['Edge spectrum', quartz],
   ['qFgOn', 'Foreground pass', 'toggle'],
   ['qFgStep', 'Step', 0, 40, 0.5, () => state.qFgOn],
   ['qFgHeight', 'Height', 1, 80, 0.5, () => state.qFgOn],
   ['qFgStrength', 'Strength', 0, 1, 0.01, () => state.qFgOn],
-  ['Shadow'],
+  ['Shadow', analytic],
   ['shadow', 'Opacity', 0, 1, 0.01],
   ['shRad', 'Radius', 0.5, 80, 0.5],
   ['shOffX', 'Offset X', -60, 60, 0.5],
@@ -551,7 +669,11 @@ for (const item of SCHEMA) {
   if (a === 'toggle') {
     const row = el('div', 'btns'), btn = el('button');
     row.appendChild(btn); body.appendChild(row);
-    btn.onclick = () => { state[k] = !state[k]; sync(); };
+    btn.onclick = () => {
+      state[k] = !state[k];
+      if (k === 'qClear' || k === 'qDark') Object.assign(state, state.qDark ? QC_DARK : state.qClear ? QC_CLEAR : QC_REGULAR);
+      sync();
+    };
     controls.push({ k, row, visible, sync: () => { btn.textContent = `${label}: ${state[k] ? 'on' : 'off'}`; btn.classList.toggle('on', state[k]); } });
     continue;
   }
@@ -712,6 +834,18 @@ function frame(now){
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frame);
 }
+// CA::ColorMatrix::set_ycc_composite, closed form (probed on macOS 26.6):
+// remap luma into [black, white] keeping chroma, saturate around luma, then
+// composite under the premultiplied fill. Returns a column-major mat3 + bias.
+function ycc(black, white, sat, fill = [0, 0, 0, 0]){
+  const Y = [0.2126, 0.7152, 0.0722], k = white - black - 1, a = 1 - fill[3], m = [];
+  for (let col = 0; col < 3; col++) for (let row = 0; row < 3; row++) {
+    let v = 0;   // (sat*I + (1-sat)*1Y^T) * (I + k*1Y^T)
+    for (let j = 0; j < 3; j++) v += (sat * (row === j) + (1 - sat) * Y[j]) * ((j === col) + k * Y[col]);
+    m.push(a * v);
+  }
+  return { m, b: [0, 1, 2].map(i => a * black + fill[i]) };
+}
 function drawQC(W, H, cover){
   ensureBack(W, H, cover);
   gl.viewport(0, 0, W, H);
@@ -724,37 +858,50 @@ function drawQC(W, H, cover){
   f('uRes', W, H); f('uDpr', dpr); f('uCenter', pos.x * dpr, H - pos.y * dpr);
   const hw = state.w / 2, hh = state.h / 2;
   f('uHalf', hw, hh); f('uRadius', Math.min(state.radius, hw, hh)); f('uExp', state.squircle ? state.exp : 2);
-  f('uShadow', state.shadow); f('uShRad', state.shRad); f('uShOff', state.shOffX, state.shOffY);
+  f('uShadow', 0);   // the glass's own shadow term (tint) draws it
   f('globalAlpha', 1);
   gl.uniform1i(u.uFgOn, state.qFgOn ? 1 : 0);
 
   // pt -> uv; the displacement angle rotates the gradient.
-  const sx = dpr / W, sy = dpr / H, a = state.qAngle * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
-  gl.uniformMatrix2fv(u['uBG.gradTransform'], false, [sx * c, sy * s, -sx * s, sy * c]);
+  const sx = dpr / W, sy = dpr / H, a = state.qAngle * Math.PI / 180, ca = Math.cos(a), sn = Math.sin(a);
+  gl.uniformMatrix2fv(u['uBG.gradTransform'], false, [sx * ca, sy * sn, -sx * sn, sy * ca]);
   gl.uniformMatrix2fv(u['uFG.gradTransform'], false, [sx, 0, 0, sy]);
-  const I = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-  const L = [0.2125, 0.7154, 0.0721], sat = state.qSat, br = state.qFaceBright, face = [];
-  for (let col = 0; col < 3; col++) for (let row = 0; row < 3; row++)
-    face.push(br * ((1 - sat) * L[col] + (row === col ? sat : 0)));
-  const rb = state.qRimBright;
-  f('uBG.caAmount1', state.qAmount); f('uBG.caEdge1', 1 / state.qHeight);
-  f('uBG.caAmount2', state.qAmount2); f('uBG.caEdge2', 1 / state.qHeight2);
-  f('uBG.caMixLo', -11); f('uBG.caMixHi', -3); f('uBG.caMixAmount', state.qMix);
-  f('uBG.mipLodScale1', state.qBlur); f('uBG.mipLodScale3', state.qRimBlur); f('uBG.blurMip', state.qBlur);
-  f('uBG.rimAmount', state.qRimAmount); f('uBG.rimEdge', 1 / state.qRimHeight);
-  f('uBG.rimLo', -state.qRimHeight); f('uBG.rimHi', 0); f('uBG.rimStrength', state.qRimStrength);
-  f('uBG.lensAmount', state.qAmount); f('uBG.lensEdge', 1 / state.qHeight); f('uBG.lensBase', 0);
-  f('uBG.lensScale', 1); f('uBG.profileScale', 1); f('uBG.bleedUV', 0, 0);
-  m3('uBG.faceM', face); f('uBG.faceBias', 0, 0, 0);
-  f('uBG.mat2Amount', sat !== 1 || br !== 1 ? 1 : 0);
-  m3('uBG.rimM', [rb, 0, 0, 0, rb, 0, 0, 0, rb]); f('uBG.rimBias', 0, 0, 0);
-  m3('uBG.tintM', I); f('uBG.tintBias', 0, 0, 0); f('uBG.tintAmount', 0); f('uBG.tintAlpha', 0);
-  f('uBG.caLumaBias', 1); f('uBG.spec', 0.9, 0.45, 0.15); f('uBG.knots', 0, 1 / 3, 2 / 3, 1);
-  f('uBG.specScaleBias', state.qSpec, 0);
-  f('uBG.fadeAmount', 0); f('uBG.fadeLo', -11); f('uBG.fadeHi', -3); f('uBG.fadeScale', 1);
-  f('uBG.hdrClampMax', 0); f('uBG.premulClamp', 0); f('uBG.chromaEnable', 1);
+  // Uniform formulas from CA::OGL::GlassBackgroundFilter::render. Radii are
+  // 1.6 x input x S (S = backing scale = dpr); bleed/shadow radii are halved
+  // and zeroed when their opacity is 0. Blur "knots" are BlurDistance0..3 and
+  // "spec" is the BlurOpacity deltas, so the remap lerps an opacity curve over
+  // the blur radius; it never reaches lod 0 at the rim.
+  const X = QC_FIXED, S = 1.6 * dpr, inv = v => v > 0 ? 1 / v : 0, sat01 = v => Math.min(Math.max(v, 0), 1);
+  const op = X.blurOpacity, cm = (n, c) => { m3(n + 'M', c.m); f(n + 'Bias', ...c.b); };
+  f('uBG.caAmount1', state.qInnerAmount); f('uBG.caEdge1', inv(state.qInnerHeight));
+  f('uBG.caAmount2', state.qOuterAmount); f('uBG.caEdge2', inv(state.qOuterHeight));
+  f('uBG.caMixLo', X.refrDist[0]); f('uBG.caMixHi', X.refrDist[1]); f('uBG.caMixAmount', state.qRefrOpacity);
+  f('uMaxLod', back.levels - 1);
+  f('uBG.mipLodScale1', S * state.qBlur);
+  f('uBG.mipLodScale3', state.qBleedOpacity > 0 ? S * 0.5 * state.qBleedBlur : 0);
+  f('uBG.blurMip', state.qShadowOpacity > 0 ? S * 0.5 * state.qShadowBlur : 0);
+  f('uBG.caLumaBias', op[0]); f('uBG.spec', op[0] - op[1], op[1] - op[2], op[2] - op[3]);
+  f('uBG.knots', ...state.blurDist); f('uBG.chromaEnable', 1);
+  f('uBG.rimAmount', state.qBleedAmount); f('uBG.rimEdge', inv(state.qBleedHeight));
+  f('uBG.rimLo', X.bleedDist[0]); f('uBG.rimHi', X.bleedDist[1]); f('uBG.rimStrength', sat01(state.qBleedOpacity));
+  f('uBG.specScaleBias', ...(state.qBleedDarken ? [1, 0] : [-1, 1]));
+  const [bb, bw, bs] = state.qBleedCM, [sb, sw, ss, sa] = state.qShadowCM, fa = state.qFill, fr = state.qFillRgb * fa;
+  cm('uBG.face', ycc(state.qFaceBlack, state.qFaceWhite, state.qFaceSat, [fr, fr, fr, fa]));
+  f('uBG.mat2Amount', 1);
+  cm('uBG.rim', ycc(bb, bw, bs));
+  cm('uBG.tint', ycc(sb, sw, ss, [0, 0, 0, sa]));
+  // SDR: headroom fraction h = 0, so holding tone is fully on and the SDR
+  // shadow opacity adds straight onto the shadow fill alpha.
+  f('uBG.tintAmount', state.qShadowVibrancy); f('uBG.tintAlpha', sa + X.sdrShadowOpacity);
+  f('uBG.lensAmount', X.shadowAmount); f('uBG.lensEdge', inv(X.shadowHeight)); f('uBG.lensBase', 0);
+  f('uBG.lensScale', sat01(state.qShadowOpacity)); f('uBG.profileScale', inv(X.shadowRadius));
+  f('uBG.bleedUV', ...X.shadowOffset);   // sdfTex() takes pt, y up
+  f('uBG.fadeAmount', 1); f('uBG.fadeLo', X.sdrDist[0]); f('uBG.fadeHi', X.sdrDist[1]); f('uBG.fadeScale', X.sdrWhite);
+  f('uBG.hdrClampMax', 0); f('uBG.premulClamp', 0);
 
-  f('uFG.rimAmount1', state.qAmount); f('uFG.rimEdge1', 1 / state.qHeight); f('uFG.rimBase1', 0);
+  // No standard macOS 26 glass instantiates glassForeground; these stay knobs.
+  const c = 1, s = 0;
+  f('uFG.rimAmount1', state.qOuterAmount); f('uFG.rimEdge1', inv(state.qOuterHeight)); f('uFG.rimBase1', 0);
   f('uFG.rimAmount2', state.qFgStep); f('uFG.rimEdge2', 1 / state.qFgHeight); f('uFG.rimBase2', 0);
   f('uFG.dirScaleU', c); f('uFG.dirScaleV', s); f('uFG.dirScaleU1', c); f('uFG.dirScaleV1', s);
   f('uFG.fadeLo', -11); f('uFG.fadeHi', -3);

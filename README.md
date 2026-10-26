@@ -32,8 +32,35 @@ first port look bad, now fixed:
   the rim) and its glow came out as 7x alpha, which blew everything out white
 - the CPU-baked SDF had its y gradient flipped relative to the backdrop uvs
 
-Values that aren't recovered (spectral knots/weights, rim matrix, inner
-refraction pair) are guesses and are labeled as sliders.
+The uniforms now come from macOS 26.6 itself: the formulas from
+`CA::OGL::GlassBackgroundFilter::render`, and the inputs AppKit sets on a live
+`NSGlassEffectView` (regular and clear, light mode). "Clear glass" switches
+between the two recipes, and the sliders are the real CAFilter inputs. A few
+things that turned out different from the old guesses:
+
+- the "knots" are BlurDistance0..3 and the "spectral weights" are the deltas
+  between BlurOpacity0..3, so the remap just scales the blur radius by an
+  opacity curve. It dips a bit near the edge but never reaches 0, so the rim
+  stays blurred
+- blur radii are `1.6 x input x backing scale`, in pixels
+- no standard glass on macOS 26 creates a `glassForeground` filter, so the
+  foreground pass is off by default. When it does run, it reads level 0 of its
+  input
+- the face/bleed/shadow color matrices are `set_ycc_composite` (luma remap
+  into [black, white], saturate, composite under the fill), rebuilt in `ycc()`
+
+Still missing: the HDR clamp limit (left off). Dark mode is its own
+recipe (QC_DARK): AppKit only changes colors and amounts, not the math.
+
+`css.html` is the same recipe done with CSS and SVG filters, no WebGL: one
+`filter: url(#lg)` chain doing blur, `feDisplacementMap` for the refraction
+(map baked from the same SDF/`edgeOffset`), the face matrix as
+`feColorMatrix`, and the luma-gated bleed as gamma + arithmetic composites.
+It gets surprisingly close. What it can't do: a per-pixel mip lod (it blends
+two gaussians by a mask instead), the 8-bit displacement map steps a little
+at the rim, the vibrant shadow is a plain `box-shadow`, and since browsers
+don't take SVG filters in `backdrop-filter`, the glass carries its own copy
+of the wallpaper, so it only works over a static background.
 
 All lengths are in points. "macOS" applies the recovered values: displacement
 height 20, curvature 1, refraction 30, highlight angle 90° / spread 180° /
