@@ -416,7 +416,9 @@ const DEFAULTS = {
 // with no outer refraction, bleed or shadow. Color matrices are
 // [black, white, saturation(, fill alpha)] fed through set_ycc_composite.
 const clamp01 = v => Math.min(Math.max(v, 0), 1);
-function qcRecipe(S, clear, dark, active){
+function qcRecipe(S, clear, dark, active, tinted){
+  // NSGlassDiffusionSetting (System Settings "Liquid Glass"): tinted only
+  // deepens the regular-style face matrix. Measured 0 vs 1 at S = 100 and 200.
   const t = clamp01((S - 64) / 96), small = clamp01((160 - S) / 112);
   const r = {
     qClear: clear, qDark: dark, qActive: active,
@@ -434,10 +436,15 @@ function qcRecipe(S, clear, dark, active){
   };
   if (clear) Object.assign(r, { qFaceBlack: 0.075, qFaceWhite: 1.15, qFaceSat: 1.06, qFill: 0, qFillRgb: 1,
     qBleedCM: [0.75, 1, 1.2], qShadowCM: [0, 1, 1.2, 0.1] });
-  else if (dark) Object.assign(r, { qFaceBlack: 0.2, qFaceWhite: 0.6, qFaceSat: 1, qFill: 0.4, qFillRgb: 0,
-    qBleedCM: [0, 0.5, 1], qShadowCM: [0, 0.5, 1, 0] });
-  else Object.assign(r, { qFaceBlack: S < 64 ? 0.85 : 0.5, qFaceWhite: 1.03, qFaceSat: 1,
-    qFill: S < 64 ? 0.25 : 0.4, qFillRgb: 1, qBleedCM: [0.9, 1, 1.2], qShadowCM: [0, 1, 1.8, 0.12] });
+  else if (dark) Object.assign(r, tinted
+    ? { qFaceBlack: 0.2, qFaceWhite: 0.75, qFaceSat: 2, qFill: 0.6, qFillRgb: 0 }
+    : { qFaceBlack: 0.2, qFaceWhite: 0.6, qFaceSat: 1, qFill: 0.4, qFillRgb: 0 },
+    { qBleedCM: [0, 0.5, 1], qShadowCM: [0, 0.5, 1, 0] });
+  else Object.assign(r, tinted
+    ? { qFaceBlack: 0.25, qFaceWhite: 1.03, qFaceSat: 2, qFill: 0.8 }
+    : { qFaceBlack: S < 64 ? 0.85 : 0.5, qFaceWhite: 1.03, qFaceSat: 1,
+        qFill: S < 64 ? 0.25 : 0.4 },
+    { qFillRgb: 1, qBleedCM: [0.9, 1, 1.2], qShadowCM: [0, 1, 1.8, 0.12] });
   if (!active) Object.assign(r, {
     qOuterAmount: 0, qOuterHeight: 0, qRefrOpacity: 0, blurDist: [0, 0, 0, 0], qBlurOpacity: [1, 1, 1, 1],
     qBleedBlur: 0, qBleedOpacity: 0, qShadowOpacity: 0, qShadowBlur: 0, qShadowVibrancy: 0,
@@ -452,8 +459,8 @@ const QC_FIXED = {
   shadowAmount: 75, shadowRadius: 24, shadowOffset: [0, 8],
   sdrDist: [-2, -1], sdrWhite: 0.97, sdrShadowOpacity: 0.24,
 };
-const applyRecipe = st => Object.assign(st, qcRecipe(Math.min(st.w, st.h), st.qClear, st.qDark, st.qActive));
-Object.assign(DEFAULTS, { qSized: true }, qcRecipe(Math.min(DEFAULTS.w, DEFAULTS.h), false, false, true));
+const applyRecipe = st => Object.assign(st, qcRecipe(Math.min(st.w, st.h), st.qClear, st.qDark, st.qActive, st.qTinted));
+Object.assign(DEFAULTS, { qSized: true, qTinted: true }, qcRecipe(Math.min(DEFAULTS.w, DEFAULTS.h), false, false, true, true));
 // Values recovered from QuartzCore (+defaultValues / GlassBackgroundFilter::render):
 // displacement height 20 + curvature 1, refraction height 30, highlight
 // angle pi/2 spread pi amount 0.5, key/fill amounts 0.5, shadow radius 10 offset {0,-10}.
@@ -483,6 +490,7 @@ const SCHEMA = [
   ['qDark', 'Dark mode', 'toggle'],
   ['qRimHl', 'Rim highlight', 'toggle'],
   ['qActive', 'Window focused', 'toggle'],
+  ['qTinted', 'Tinted', 'toggle'],
   ['qSized', 'Size-driven amounts', 'toggle'],
   ['Refraction'],
   ['qAngle', 'Angle', -180, 180, 1],
@@ -534,7 +542,7 @@ for (const item of SCHEMA) {
     row.appendChild(btn); body.appendChild(row);
     btn.onclick = () => {
       state[k] = !state[k];
-      if (k === 'qClear' || k === 'qDark' || k === 'qActive' || (k === 'qSized' && state.qSized)) {
+      if (k === 'qClear' || k === 'qDark' || k === 'qActive' || (k === 'qSized' && state.qSized) || k === 'qTinted') {
         if (state[k] && (k === 'qClear' || k === 'qDark')) { state.qClear = state.qDark = false; state[k] = true; }   // variants are exclusive
         applyRecipe(state);
       }

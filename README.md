@@ -42,6 +42,10 @@ things that turned out different from the old guesses:
   rebuilds all of it, and "Size-driven amounts" reapplies it when you resize
 - dark mode changes colors plus the bleed/shadow opacities and `inputClamp`.
   Clear glass is the same in light and dark
+- System Settings' "Liquid Glass" option (`NSGlassDiffusionSetting`) only
+  deepens the regular-style face matrix: tinted light is black 0.25, sat 2,
+  white fill 0.8; tinted dark is white 0.75, sat 2, black fill 0.6. "Tinted"
+  toggles it, and it does nothing on clear glass
 - `inputClamp` is 1.06961 for regular light, 1.0 for regular dark and 1.375824
   for clear, applied per channel (`ClampPreserveHue` is off)
 - the backdrop is captured at 1/4 resolution for regular and 1/2 for clear
