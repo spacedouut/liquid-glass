@@ -3,27 +3,12 @@
 A WebGL2 take on the macOS 26 Liquid Glass material, over Apple's own wallpapers.
 
 The shape is an analytic rounded rect (or squircle, for continuous corners).
-The edge math comes from QuartzCore's `glass_background_lpf` /
-`glass_foreground_lpf` in `default.metallib`:
-
-- refraction: the backdrop is sampled outward along the SDF gradient by the
-  circular-cap `edgeOffset` curve (full amount at the rim, zero at depth
-  "height"), with per-channel dispersion
-- frost: a real separable gaussian on the backdrop, mixed in by "Amount"
-- highlight: a directional cone (angle / spread / amount) and the opposite
-  fill light
-- edge spectrum: the foreground pass's 7-tap walk along the normal
-  (R from the outward taps, B from the inward taps)
-- drop shadow
-
-That's the default "analytic" shader: same edge math, simpler pipeline.
-
-Flip "QuartzCore port" on for the faithful version: `glass_background_lpf` and
-`glass_foreground_lpf` transcribed line for line (mip-biased dispersion taps A/B,
-spectral knot remap, face/rim color matrices, luma specular, fade/HDR clamp,
-then the 7-tap foreground walk), composited premultiplied like CA does. The
-only stand-in is the SDF texture, evaluated analytically. Things that made the
-first port look bad, now fixed:
+The shader is `glass_background_lpf` and `glass_foreground_lpf` from
+QuartzCore's `default.metallib`, transcribed line for line (mip-biased
+dispersion taps A/B, spectral knot remap, face/rim color matrices, luma
+specular, fade/HDR clamp, then the 7-tap foreground walk), composited
+premultiplied like CA does. The only stand-in is the SDF texture, evaluated
+analytically. Things that made the first port look bad, now fixed:
 
 - amounts were pre-divided into uv, but the shader adds them to the SDF
   distance (`edgeOffset + d` drives the mip remap). They're in pt now, and
@@ -34,7 +19,8 @@ first port look bad, now fixed:
 
 The uniforms now come from macOS 26.6 itself: the formulas from
 `CA::OGL::GlassBackgroundFilter::render`, and the inputs AppKit sets on a live
-`NSGlassEffectView` (regular and clear, light mode). "Clear glass" switches
+`NSGlassEffectView` (regular and clear, light and dark, focused and
+unfocused, swept over sizes). "Clear glass" switches
 between the two recipes, and the sliders are the real CAFilter inputs. A few
 things that turned out different from the old guesses:
 
@@ -49,8 +35,25 @@ things that turned out different from the old guesses:
 - the face/bleed/shadow color matrices are `set_ycc_composite` (luma remap
   into [black, white], saturate, composite under the fill), rebuilt in `ycc()`
 
-Still missing: the HDR clamp limit (left off). Dark mode is its own
-recipe (QC_DARK): AppKit only changes colors and amounts, not the math.
+- most amounts scale with the glass's short side S in pt. Outer refraction
+  is 0.2 S over 0.125 S, `BlurDistance0` is -0.5 S, bleed is 0.35 S with a
+  min(0.7 S, 160) blur, and the shadow height is 0.4 S. Under S = 160 the blur
+  radius shrinks, the bleed fades out and the shadow gets darker. `qcRecipe()`
+  rebuilds all of it, and "Size-driven amounts" reapplies it when you resize
+- dark mode changes colors plus the bleed/shadow opacities and `inputClamp`.
+  Clear glass is the same in light and dark
+- System Settings' "Liquid Glass" option (`NSGlassDiffusionSetting`) only
+  deepens the regular-style face matrix: tinted light is black 0.25, sat 2,
+  white fill 0.8; tinted dark is white 0.75, sat 2, black fill 0.6. "Tinted"
+  toggles it, and it does nothing on clear glass
+- `inputClamp` is 1.06961 for regular light, 1.0 for regular dark and 1.375824
+  for clear, applied per channel (`ClampPreserveHue` is off)
+- the backdrop is captured at 1/4 resolution for regular and 1/2 for clear
+  (`CABackdropLayer.scale`), so the mip lod never goes below that level
+- an unfocused window gets a flat recipe with no outer refraction, bleed,
+  shadow or SDR holding tone. "Window focused" toggles it
+
+AppKit doesn't change the math between any of these, only the inputs.
 
 `css.html` is the same recipe done with CSS and SVG filters, no WebGL: one
 `filter: url(#lg)` chain doing blur, `feDisplacementMap` for the refraction
@@ -67,7 +70,9 @@ height 20, curvature 1, refraction 30, highlight angle 90° / spread 180° /
 amount 0.5, fill 0.5, shadow radius 10 at {0, -10}. "Reset" goes back to the
 playground defaults.
 
-Turn "Follow cursor" off to drag the glass around, or click to drop it somewhere.
+Following the cursor uses the spring SwiftUI uses for drags (`.interactiveSpring()`,
+response 0.15 s, damping 0.85). Turn "Follow cursor" off to drag the glass
+around, or click to drop it somewhere.
 H hides the panel, and clicking the title collapses it. "Copy JSON" exports
 the current params.
 
