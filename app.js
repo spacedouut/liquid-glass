@@ -660,21 +660,35 @@ function resize(){
 pos.x = target.x = innerWidth < 640 ? innerWidth / 2 : innerWidth / 2 - 130; pos.y = target.y = innerHeight / 2;
 posB.x = Math.min(pos.x + 340, innerWidth - 100); posB.y = pos.y + 60;
 
-// Stretch: the glass's measured velocity (spring follow or drag alike) sets a
-// target log-stretch a, x scaled by e^a and y by e^-a so the area holds. It
-// saturates at +-0.4 and reaches it through a bouncy spring (response 0.4 s,
-// damping 0.5), so the glass jiggles back into shape when it stops.
-const mvel = { x: 0, y: 0 }, lastPos = { x: 0, y: 0 };
-let sq = 0, sqv = 0;
-function stretchStep(dt){
-  if (jumped || dt <= 0) { lastPos.x = pos.x; lastPos.y = pos.y; jumped = false; if (dt <= 0) return; }
-  const lp = 1 - Math.exp(-dt / 0.04);
-  mvel.x += ((pos.x - lastPos.x) / dt - mvel.x) * lp; mvel.y += ((pos.y - lastPos.y) / dt - mvel.y) * lp;
-  lastPos.x = pos.x; lastPos.y = pos.y;
-  const goal = state.stretch ? 0.4 * Math.tanh(state.stretchAmount * (Math.abs(mvel.x) - Math.abs(mvel.y)) / 400) : 0;
-  const w0 = 2 * Math.PI / 0.4, k = w0 * w0, c = 2 * 0.5 * w0;
-  for (let n = Math.ceil(dt * 480), h = dt / n; n > 0; n--) { sqv += (k * (goal - sq) - c * sqv) * h; sq += sqv * h; }
+// Stretch: each glass gets its own pair of log-stretch springs, one per axis,
+// driven by its measured velocity (spring follow or drag alike). An axis
+// elongates with its own speed and the other axis compresses through Poisson
+// coupling (nu = 0.5, near-incompressible rubber), so the shape squashes along
+// whatever direction it actually moves — diagonals included. Each spring
+// saturates at 0.4 and is underdamped (response 0.4 s, damping 0.5), so the
+// glass jiggles back into shape when it stops.
+const POISSON = 0.5;
+function makeStretch(p){
+  return { p, vel: { x: 0, y: 0 }, last: { x: p.x, y: p.y }, ex: 0, exv: 0, ey: 0, eyv: 0 };
 }
+const stretchA = makeStretch(pos), stretchB = makeStretch(posB);
+function stretchStep(s, dt){
+  if (dt <= 0) { s.last.x = s.p.x; s.last.y = s.p.y; return; }
+  const lp = 1 - Math.exp(-dt / 0.04);
+  s.vel.x += ((s.p.x - s.last.x) / dt - s.vel.x) * lp; s.vel.y += ((s.p.y - s.last.y) / dt - s.vel.y) * lp;
+  s.last.x = s.p.x; s.last.y = s.p.y;
+  const gx = state.stretch ? 0.4 * Math.tanh(state.stretchAmount * Math.abs(s.vel.x) / 400) : 0;
+  const gy = state.stretch ? 0.4 * Math.tanh(state.stretchAmount * Math.abs(s.vel.y) / 400) : 0;
+  const w0 = 2 * Math.PI / 0.4, k = w0 * w0, c = 2 * 0.5 * w0;
+  for (let n = Math.ceil(dt * 480), h = dt / n; n > 0; n--) {
+    s.exv += (k * (gx - s.ex) - c * s.exv) * h; s.ex += s.exv * h;
+    s.eyv += (k * (gy - s.ey) - c * s.eyv) * h; s.ey += s.eyv * h;
+  }
+}
+// Applied half-extent multipliers: own-axis elongation minus Poisson
+// compression from the other axis's elongation.
+function squashX(s){ return Math.exp(s.ex - POISSON * s.ey); }
+function squashY(s){ return Math.exp(s.ey - POISSON * s.ex); }
 
 
 // ---- frame ---------------------------------------------------------------------
@@ -692,7 +706,9 @@ function frame(now){
       pos.x += vel.x * h; pos.y += vel.y * h;
     }
   } else vel.x = vel.y = 0;
-  stretchStep(dt);
+  if (jumped) { stretchA.last.x = pos.x; stretchA.last.y = pos.y; stretchA.vel.x = stretchA.vel.y = 0; jumped = false; }
+  stretchStep(stretchA, dt);
+  stretchStep(stretchB, dt);
   const ca = W / H;
   const cover = ca > imgAspect ? [1, imgAspect / ca] : [ca / imgAspect, 1];
 
@@ -721,13 +737,13 @@ function drawQC(W, H, cover){
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, back.t);
   gl.uniform1i(u.srcTex, 0);
   f('uRes', W, H); f('uDpr', dpr); f('uCenter', pos.x * dpr, H - pos.y * dpr);
-  const hw = state.w / 2 * Math.exp(sq), hh = state.h / 2 * Math.exp(-sq);
+  const hw = state.w / 2 * squashX(stretchA), hh = state.h / 2 * squashY(stretchA);
   // CASDFElementLayer's continuous corner isn't our superellipse: r56
   // continuous measures as radius*1.375 at exp 3 (0.3pt RMS fit).
   f('uHalf', hw, hh);
   f('uRadius', Math.min(state.radius * (state.squircle ? 1.375 : 1), hw, hh));
   f('uExp', state.squircle ? state.exp : 2);
-  const hw2 = state.w2 / 2, hh2 = state.h2 / 2;   // a pill: radius = half the short side
+  const hw2 = state.w2 / 2 * squashX(stretchB), hh2 = state.h2 / 2 * squashY(stretchB);   // a pill: radius = half the short side
   f('uHalf2', hw2, hh2); f('uRadius2', Math.min(hw2, hh2));
   f('uOff2', posB.x - pos.x, pos.y - posB.y);    // pt, y up like q
   f('uMerge', state.merge ? state.mergeK : -1);
