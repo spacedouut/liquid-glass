@@ -167,7 +167,15 @@ function buildFilter(){
   const sB = v.bleedOpacity > 0 ? sigma(0.5 * v.bleedBlur, 1) : 0;
   srcPad = Math.max(PAD, Math.ceil(3 * sB));
   const regW = W + 2 * srcPad, regH = H + 2 * srcPad, o = srcPad - PAD;
-  const [fb, fw, fs, fa] = v.face, face = cmValues(ycc(fb, fw, fs, [fa, fa, fa, fa]), SDR_WHITE);
+  // Everything but the bleed's input only matters over the baked box, so keep
+  // the primitives to that subregion instead of the whole padded element.
+  const sub = `x="${o}" y="${o}" width="${cw}" height="${ch}"`;
+  // The face matrix, plus a copy whose alpha is the face's luminance so the
+  // bleed mix below runs as one chain. Browsers evaluate a reused result once
+  // per use, so the old lum/e/ie fan-out ran the whole blur stack 3 times.
+  const [fb, fw, fs, fa] = v.face, faceRows = ycc(fb, fw, fs, [fa, fa, fa, fa]).map(r => r.map(x => x * SDR_WHITE));
+  const lum = [0, 1, 2, 3].map(c => faceRows.reduce((a, r, i) => a + [0.2126, 0.7152, 0.0722][i] * r[c], 0));
+  const face = cmValues(faceRows), faceLum = face.replace(/ 0 0 0 1 0$/, ` ${lum[0]} ${lum[1]} ${lum[2]} 0 ${lum[3]}`);
   const bleed = cmValues(ycc(...v.bleedCM));
   // N blur levels spaced evenly in lod between the full and the edge radius,
   // each weighted by a tent of the mask (a linear table with one 1 is a tent).
@@ -175,47 +183,35 @@ function buildFilter(){
   const levels = Array.from({ length: N }, (_, i) => {
     const tent = Array.from({ length: N }, (_, j) => +(i === j)).join(' ');
     return `
-    <feGaussianBlur in="SourceGraphic" stdDeviation="${sF * Math.pow(ratio, i / (N - 1))}" result="b${i}"/>
-    <feComponentTransfer in="mask" result="w${i}">${rgbTable(tent)}</feComponentTransfer>
-    <feComposite in="b${i}" in2="w${i}" operator="arithmetic" k1="1" result="${i ? `l${i}` : 's0'}"/>` +
+    <feGaussianBlur ${sub} in="SourceGraphic" stdDeviation="${sF * Math.pow(ratio, i / (N - 1))}" result="b${i}"/>
+    <feComponentTransfer ${sub} in="mask" result="w${i}">${rgbTable(tent)}</feComponentTransfer>
+    <feComposite ${sub} in="b${i}" in2="w${i}" operator="arithmetic" k1="1" result="${i ? `l${i}` : 's0'}"/>` +
       (i ? `
-    <feComposite in="s${i - 1}" in2="l${i}" operator="arithmetic" k2="1" k3="1" result="${i === N - 1 ? 'blur' : `s${i}`}"/>` : '');
+    <feComposite ${sub} in="s${i - 1}" in2="l${i}" operator="arithmetic" k2="1" k3="1" result="${i === N - 1 ? 'blur' : `s${i}`}"/>` : '');
   }).join('');
   // glass_foreground's dispersion: red sampled a step out along the gradient,
   // blue a step in, green straight, over a rim band abHeight pt deep.
   const disperse = maps.ab ? `
     <feImage href="${maps.ab}" x="${o}" y="${o}" width="${cw}" height="${ch}" preserveAspectRatio="none" result="abm"/>
-    <feComponentTransfer in="abm" result="abn"><feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/></feComponentTransfer>
-    <feDisplacementMap in="refr0" in2="abm" scale="${maps.abScale}" xChannelSelector="R" yChannelSelector="G" result="rp"/>
-    <feDisplacementMap in="refr0" in2="abn" scale="${maps.abScale}" xChannelSelector="R" yChannelSelector="G" result="bp"/>
-    <feColorMatrix in="rp" type="matrix" values="${CH_R}" result="rc"/>
-    <feColorMatrix in="refr0" type="matrix" values="${CH_G}" result="gc"/>
-    <feColorMatrix in="bp" type="matrix" values="${CH_B}" result="bc"/>
-    <feComposite in="rc" in2="gc" operator="arithmetic" k2="1" k3="1" result="rg"/>
-    <feComposite in="rg" in2="bc" operator="arithmetic" k2="1" k3="1" result="refr"/>` : '';
-  const L = '0.2126 0.7152 0.0722 0 0';
+    <feComponentTransfer ${sub} in="abm" result="abn"><feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/></feComponentTransfer>
+    <feDisplacementMap ${sub} in="refr0" in2="abm" scale="${maps.abScale}" xChannelSelector="R" yChannelSelector="G" result="rp"/>
+    <feDisplacementMap ${sub} in="refr0" in2="abn" scale="${maps.abScale}" xChannelSelector="R" yChannelSelector="G" result="bp"/>
+    <feColorMatrix ${sub} in="rp" type="matrix" values="${CH_R}" result="rc"/>
+    <feColorMatrix ${sub} in="refr0" type="matrix" values="${CH_G}" result="gc"/>
+    <feColorMatrix ${sub} in="bp" type="matrix" values="${CH_B}" result="bc"/>
+    <feComposite ${sub} in="rc" in2="gc" operator="arithmetic" k2="1" k3="1" result="rg"/>
+    <feComposite ${sub} in="rg" in2="bc" operator="arithmetic" k2="1" k3="1" result="refr"/>` : '';
   document.getElementById('defs').innerHTML = `
   <filter id="${id}" x="0" y="0" width="${regW}" height="${regH}" filterUnits="userSpaceOnUse"
           primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
     <feImage href="${maps.disp}" x="${o}" y="${o}" width="${cw}" height="${ch}" preserveAspectRatio="none" result="disp"/>
     <feImage href="${maps.mask}" x="${o}" y="${o}" width="${cw}" height="${ch}" preserveAspectRatio="none" result="mask"/>${levels}
-    <feDisplacementMap in="blur" in2="disp" scale="${maps.scale}" xChannelSelector="R" yChannelSelector="G" result="${maps.ab ? 'refr0' : 'refr'}"/>${disperse}
-    <feColorMatrix in="refr" type="matrix" values="${face}" result="face"/>
-    ${v.bleedOpacity > 0 ? `
-    <feGaussianBlur in="SourceGraphic" stdDeviation="${sB}" result="amb"/>
-    <feColorMatrix in="amb" type="matrix" values="${bleed}" result="rimc"/>
-    <feColorMatrix in="face" type="matrix" values="${L} ${L} ${L} 0 0 0 1 0" result="lum"/>
-    <feComponentTransfer in="lum" result="e">
-      <feFuncR type="gamma" exponent="4" amplitude="${v.bleedOpacity}"/>
-      <feFuncG type="gamma" exponent="4" amplitude="${v.bleedOpacity}"/>
-      <feFuncB type="gamma" exponent="4" amplitude="${v.bleedOpacity}"/>
-    </feComponentTransfer>
-    <feComponentTransfer in="e" result="ie">
-      <feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/><feFuncB type="table" tableValues="1 0"/>
-    </feComponentTransfer>
-    <feComposite in="face" in2="ie" operator="arithmetic" k1="1" result="a"/>
-    <feComposite in="rimc" in2="e" operator="arithmetic" k1="1" result="b"/>
-    <feComposite in="a" in2="b" operator="arithmetic" k2="1" k3="1"/>` : ''}
+    <feDisplacementMap ${sub} in="blur" in2="disp" scale="${maps.scale}" xChannelSelector="R" yChannelSelector="G" result="${maps.ab ? 'refr0' : 'refr'}"/>${disperse}
+    <feColorMatrix ${sub} in="refr" type="matrix" values="${v.bleedOpacity > 0 ? faceLum : face}"/>${v.bleedOpacity > 0 ? `
+    <feComponentTransfer ${sub} result="fa"><feFuncA type="gamma" exponent="4" amplitude="${-v.bleedOpacity}" offset="1"/></feComponentTransfer>
+    <feGaussianBlur ${sub} in="SourceGraphic" stdDeviation="${sB}" result="amb"/>
+    <feColorMatrix ${sub} in="amb" type="matrix" values="${bleed}" result="rimc"/>
+    <feComposite ${sub} in="fa" in2="rimc" operator="over"/>` : ''}
   </filter>`;
   filterId = id;
   return v;
