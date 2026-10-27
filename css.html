@@ -28,10 +28,21 @@
   button.on { border-color:var(--accent); color:var(--accent); }
   #wall { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   a { color:var(--accent); }
+  #live { position:fixed; inset:0; overflow:hidden; pointer-events:none; display:none; }
+  #live.on { display:block; }
+  #live .scroll { position:absolute; left:6vw; width:60vw; animation:drift 24s linear infinite;
+                  font:800 64px/1.05 ui-sans-serif, system-ui, sans-serif; letter-spacing:-.02em; }
+  #live .scroll p { margin:0 0 .3em; }
+  #live .spin { position:absolute; left:58vw; top:30vh; width:120px; height:120px; border-radius:28px;
+                background:conic-gradient(#ff3b30,#ffcc00,#34c759,#0a84ff,#bf5af2,#ff3b30);
+                animation:spin 6s linear infinite; }
+  @keyframes drift { from { transform:translateY(0) } to { transform:translateY(-50%) } }
+  @keyframes spin { to { transform:rotate(1turn) } }
 </style>
 </head>
 <body>
 <svg width="0" height="0" style="position:fixed"><defs id="defs"></defs></svg>
+<div id="live"><div class="spin"></div><div class="scroll"></div></div>
 <div id="glass"><div class="bd"></div></div>
 <div id="panel">
   <header>Liquid Glass, CSS edition <span>H hides</span></header>
@@ -59,9 +70,20 @@ const CLEAR = {
   face: [0.075, 1.15, 1.06, 0], shadowOpacity: 0, shadowBlur: 0,
 };
 const BLUR_DIST = [-100, -1, 0, 0], BLUR_OP = [1, 0.5, 0.5, 1], SDR_WHITE = 0.97;
-const PAD = 64;   // backdrop kept around the glass so blur/displacement can read outside it
+// Backdrop kept around the glass so blur/displacement can read outside it:
+// PAD for the baked maps, and srcPad (>= 3 sigma of the bleed blur) for the
+// element itself. Chromium clamps a backdrop-filter's input to the element
+// box, so in both modes the element is padded and clipped to the shape.
+const PAD = 64;
+let srcPad = PAD;
+// Chromium runs SVG filter references in backdrop-filter (feImage and
+// feDisplacementMap included), so the glass can sit over live content there.
+// Firefox and Safari keep the wallpaper-copy fallback.
+const CHROMIUM = navigator.userAgentData?.brands?.some(b => b.brand === 'Chromium') ?? /Chrome\/\d/.test(navigator.userAgent);
+const BACKDROP_OK = CHROMIUM && CSS.supports('backdrop-filter', 'url(#a)');
 
-const state = { w: 360, h: 220, radius: 56, exp: 5, clear: false, blurK: 0.8, wall: 10, x: innerWidth / 2, y: innerHeight / 2 };
+const state = { w: 360, h: 220, radius: 56, exp: 5, clear: false, blurK: 0.8, levels: 4, ab: false, abStep: 3, abHeight: 20,
+                backdrop: BACKDROP_OK, live: false, wall: 10, x: innerWidth / 2, y: innerHeight / 2 };
 for (const [k, v] of new URLSearchParams(location.search))
   if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : +v;
 const pos = { x: state.x, y: state.y };
@@ -81,44 +103,54 @@ function ycc(black, white, sat, fill = [0, 0, 0, 0]){
   return rows;
 }
 const cmValues = (rows, gain = 1) => rows.map(r => `${r[0] * gain} ${r[1] * gain} ${r[2] * gain} 0 ${r[3] * gain}`).join(' ') + ' 0 0 0 1 0';
-function sdf(x, y, hw, hh, R, e){
-  const wx = Math.abs(x) - hw + R, wy = Math.abs(y) - hh + R, mx = Math.max(wx, 0), my = Math.max(wy, 0);
-  const c = e === 2 ? Math.hypot(mx, my) : Math.pow(Math.pow(mx, e) + Math.pow(my, e), 1 / e);
-  return c + Math.min(Math.max(wx, wy), 0) - R;
-}
 function edgeOffset(d, edge, amount){
   const s = Math.min(Math.max(edge * -d, 0), 1);
   return amount - amount * Math.min(Math.sqrt(s * (2 - s)), 1);
 }
 
-// Bakes the displacement map (R,G = inward refraction vector) and the blur
-// mix mask (R = how far toward the edge blur radius) for the padded box.
+// Bakes, for the padded box at device resolution: the displacement map (R,G =
+// inward refraction vector), the blur mask (R = position between the full and
+// the edge blur radius, in log2/mip space) and, if on, the dispersion map
+// (R,G = glass_foreground step vector). Ordered dithering hides the 8-bit
+// quantization; device-res baking keeps the steep rim smooth on HiDPI.
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(b => (b + 0.5) / 16);
 function bakeMaps(W, H, v){
-  const cw = W + 2 * PAD, ch = H + 2 * PAD, hw = W / 2, hh = H / 2, R = Math.min(state.radius, hw, hh);
-  const scale = 2 * Math.abs(v.innerAmount) || 1;
-  const disp = document.createElement('canvas'), mask = document.createElement('canvas');
-  disp.width = mask.width = cw; disp.height = mask.height = ch;
-  const dc = disp.getContext('2d'), mc = mask.getContext('2d');
-  const di = dc.createImageData(cw, ch), mi = mc.createImageData(cw, ch);
-  const [k0, k1] = BLUR_DIST;
-  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
-    const qx = x + 0.5 - PAD - hw, qy = y + 0.5 - PAD - hh;
-    const d = sdf(qx, qy, hw, hh, R, state.exp);
-    let gx = sdf(qx + 0.5, qy, hw, hh, R, state.exp) - sdf(qx - 0.5, qy, hw, hh, R, state.exp);
-    let gy = sdf(qx, qy + 0.5, hw, hh, R, state.exp) - sdf(qx, qy - 0.5, hw, hh, R, state.exp);
-    const gl = Math.hypot(gx, gy) || 1; gx /= gl; gy /= gl;
-    const e = edgeOffset(d, 1 / v.innerHeight, v.innerAmount);
-    const i = (y * cw + x) * 4;
-    di.data[i] = Math.round(255 * (0.5 + e * gx / scale));
-    di.data[i + 1] = Math.round(255 * (0.5 + e * gy / scale));
-    di.data[i + 2] = 0; di.data[i + 3] = 255;
-    // knot remap: blur scale = op0 - (op0-op1)*sat((x-k0)/(k1-k0)); the other
-    // two segments contribute 0 with the real knots
-    const m = Math.min(Math.max((e + d - k0) / (k1 - k0), 0), 1);
-    mi.data[i] = mi.data[i + 1] = mi.data[i + 2] = Math.round(255 * m); mi.data[i + 3] = 255;
+  const pad = PAD, dpr = Math.min(devicePixelRatio || 1, 3);
+  const cw = W + 2 * pad, ch = H + 2 * pad, hw = W / 2, hh = H / 2, R = Math.min(state.radius, hw, hh);
+  const pw = Math.ceil(cw * dpr), ph = Math.ceil(ch * dpr);
+  const scale = 2 * Math.abs(v.innerAmount) || 1, abScale = 2 * Math.abs(state.abStep) || 1;
+  const [k0, k1] = BLUR_DIST, [op0, op1] = BLUR_OP, lr = Math.log(op1 / op0);
+  const mk = () => { const c = document.createElement('canvas'); c.width = pw; c.height = ph; const g = c.getContext('2d'); return [c, g, g.createImageData(pw, ph)]; };
+  const D = mk(), M = mk(), A = state.ab ? mk() : null;
+  const q8 = (x, t) => Math.min(255, Math.max(0, Math.floor(255 * x + t)));
+  const e = state.exp;
+  for (let y = 0; y < ph; y++) for (let x = 0; x < pw; x++) {
+    const qx = (x + 0.5) / dpr - pad - hw, qy = (y + 0.5) / dpr - pad - hh, t = BAYER[(x & 3) + (y & 3) * 4];
+    // rounded-rect / superellipse SDF and its analytic gradient in one go
+    // (bakes run on every slider move)
+    const sx = qx < 0 ? -1 : 1, sy = qy < 0 ? -1 : 1, wx = sx * qx - hw + R, wy = sy * qy - hh + R;
+    let d, gx = 0, gy = 0;
+    if (wx > 0 && wy > 0) {
+      const c = e === 2 ? Math.hypot(wx, wy) : Math.pow(Math.pow(wx, e) + Math.pow(wy, e), 1 / e);
+      d = c - R; gx = sx * Math.pow(wx / c, e - 1); gy = sy * Math.pow(wy / c, e - 1);
+      const gl = Math.hypot(gx, gy); gx /= gl; gy /= gl;
+    } else if (wx > 0 || (wy <= 0 && wx > wy)) { d = Math.max(wx, 0) + Math.min(wx, 0) - R; gx = sx; }
+    else { d = Math.max(wy, 0) + Math.min(wy, 0) - R; gy = sy; }
+    const r = edgeOffset(d, 1 / v.innerHeight, v.innerAmount), i = (y * pw + x) * 4;
+    D[2].data[i] = q8(0.5 + r * gx / scale, t); D[2].data[i + 1] = q8(0.5 + r * gy / scale, t); D[2].data[i + 3] = 255;
+    // knot remap: blur scale = op0 - (op0-op1)*sat((x-k0)/(k1-k0)), the other
+    // two segments contribute 0 with the real knots. CA turns the scaled radius
+    // into a mip lod, so store where it sits between the two in log space.
+    const m = Math.min(Math.max((r + d - k0) / (k1 - k0), 0), 1);
+    const u = lr ? Math.log((op0 - (op0 - op1) * m) / op0) / lr : 0;
+    M[2].data[i] = M[2].data[i + 1] = M[2].data[i + 2] = q8(u, t); M[2].data[i + 3] = 255;
+    if (A) {
+      const s = edgeOffset(d, 1 / state.abHeight, state.abStep);
+      A[2].data[i] = q8(0.5 + s * gx / abScale, t); A[2].data[i + 1] = q8(0.5 + s * gy / abScale, t); A[2].data[i + 3] = 255;
+    }
   }
-  dc.putImageData(di, 0, 0); mc.putImageData(mi, 0, 0);
-  return { disp: disp.toDataURL(), mask: mask.toDataURL(), scale, cw, ch };
+  const url = ([c, g, img]) => (g.putImageData(img, 0, 0), c.toDataURL());
+  return { disp: url(D), mask: url(M), ab: A && url(A), scale, abScale, cw, ch };
 }
 
 // Mip lod -> gaussian sigma: level L of the pyramid (gaussian decimate +
@@ -126,28 +158,48 @@ function bakeMaps(W, H, v){
 // radius is 1.6 x input x dpr device px, so sigma_css ~= blurK * 1.6 * input.
 const sigma = (input, scale) => state.blurK * 1.6 * input * scale;
 
+const CH_R = '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0', CH_G = '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0', CH_B = '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0';
+const rgbTable = vals => ['R', 'G', 'B'].map(c => `<feFunc${c} type="table" tableValues="${vals}"/>`).join('');
+let filterGen = 0, filterId = '';
 function buildFilter(){
-  const v = state.clear ? CLEAR : REGULAR, W = state.w, H = state.h;
+  const v = state.clear ? CLEAR : REGULAR, W = state.w, H = state.h, id = `lg${++filterGen}`;
   const maps = bakeMaps(W, H, v), { cw, ch } = maps;
+  const sB = v.bleedOpacity > 0 ? sigma(0.5 * v.bleedBlur, 1) : 0;
+  srcPad = Math.max(PAD, Math.ceil(3 * sB));
+  const regW = W + 2 * srcPad, regH = H + 2 * srcPad, o = srcPad - PAD;
   const [fb, fw, fs, fa] = v.face, face = cmValues(ycc(fb, fw, fs, [fa, fa, fa, fa]), SDR_WHITE);
   const bleed = cmValues(ycc(...v.bleedCM));
-  const sF = sigma(v.blur, BLUR_OP[0]), sE = sigma(v.blur, BLUR_OP[1]);
-  const sB = v.bleedOpacity > 0 ? sigma(0.5 * v.bleedBlur, 1) : 0;
+  // N blur levels spaced evenly in lod between the full and the edge radius,
+  // each weighted by a tent of the mask (a linear table with one 1 is a tent).
+  const N = Math.max(2, Math.round(state.levels)), sF = sigma(v.blur, BLUR_OP[0]), ratio = BLUR_OP[1] / BLUR_OP[0];
+  const levels = Array.from({ length: N }, (_, i) => {
+    const tent = Array.from({ length: N }, (_, j) => +(i === j)).join(' ');
+    return `
+    <feGaussianBlur in="SourceGraphic" stdDeviation="${sF * Math.pow(ratio, i / (N - 1))}" result="b${i}"/>
+    <feComponentTransfer in="mask" result="w${i}">${rgbTable(tent)}</feComponentTransfer>
+    <feComposite in="b${i}" in2="w${i}" operator="arithmetic" k1="1" result="${i ? `l${i}` : 's0'}"/>` +
+      (i ? `
+    <feComposite in="s${i - 1}" in2="l${i}" operator="arithmetic" k2="1" k3="1" result="${i === N - 1 ? 'blur' : `s${i}`}"/>` : '');
+  }).join('');
+  // glass_foreground's dispersion: red sampled a step out along the gradient,
+  // blue a step in, green straight, over a rim band abHeight pt deep.
+  const disperse = maps.ab ? `
+    <feImage href="${maps.ab}" x="${o}" y="${o}" width="${cw}" height="${ch}" preserveAspectRatio="none" result="abm"/>
+    <feComponentTransfer in="abm" result="abn"><feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/></feComponentTransfer>
+    <feDisplacementMap in="refr0" in2="abm" scale="${maps.abScale}" xChannelSelector="R" yChannelSelector="G" result="rp"/>
+    <feDisplacementMap in="refr0" in2="abn" scale="${maps.abScale}" xChannelSelector="R" yChannelSelector="G" result="bp"/>
+    <feColorMatrix in="rp" type="matrix" values="${CH_R}" result="rc"/>
+    <feColorMatrix in="refr0" type="matrix" values="${CH_G}" result="gc"/>
+    <feColorMatrix in="bp" type="matrix" values="${CH_B}" result="bc"/>
+    <feComposite in="rc" in2="gc" operator="arithmetic" k2="1" k3="1" result="rg"/>
+    <feComposite in="rg" in2="bc" operator="arithmetic" k2="1" k3="1" result="refr"/>` : '';
   const L = '0.2126 0.7152 0.0722 0 0';
   document.getElementById('defs').innerHTML = `
-  <filter id="lg" x="0" y="0" width="${cw}" height="${ch}" filterUnits="userSpaceOnUse"
+  <filter id="${id}" x="0" y="0" width="${regW}" height="${regH}" filterUnits="userSpaceOnUse"
           primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-    <feImage href="${maps.disp}" x="0" y="0" width="${cw}" height="${ch}" preserveAspectRatio="none" result="disp"/>
-    <feImage href="${maps.mask}" x="0" y="0" width="${cw}" height="${ch}" preserveAspectRatio="none" result="mask"/>
-    <feComponentTransfer in="mask" result="imask">
-      <feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/><feFuncB type="table" tableValues="1 0"/>
-    </feComponentTransfer>
-    <feGaussianBlur in="SourceGraphic" stdDeviation="${sF}" result="bF"/>
-    <feGaussianBlur in="SourceGraphic" stdDeviation="${sE}" result="bE"/>
-    <feComposite in="bF" in2="imask" operator="arithmetic" k1="1" result="bFm"/>
-    <feComposite in="bE" in2="mask" operator="arithmetic" k1="1" result="bEm"/>
-    <feComposite in="bFm" in2="bEm" operator="arithmetic" k2="1" k3="1" result="blur"/>
-    <feDisplacementMap in="blur" in2="disp" scale="${maps.scale}" xChannelSelector="R" yChannelSelector="G" result="refr"/>
+    <feImage href="${maps.disp}" x="${o}" y="${o}" width="${cw}" height="${ch}" preserveAspectRatio="none" result="disp"/>
+    <feImage href="${maps.mask}" x="${o}" y="${o}" width="${cw}" height="${ch}" preserveAspectRatio="none" result="mask"/>${levels}
+    <feDisplacementMap in="blur" in2="disp" scale="${maps.scale}" xChannelSelector="R" yChannelSelector="G" result="${maps.ab ? 'refr0' : 'refr'}"/>${disperse}
     <feColorMatrix in="refr" type="matrix" values="${face}" result="face"/>
     ${v.bleedOpacity > 0 ? `
     <feGaussianBlur in="SourceGraphic" stdDeviation="${sB}" result="amb"/>
@@ -165,12 +217,13 @@ function buildFilter(){
     <feComposite in="rimc" in2="e" operator="arithmetic" k1="1" result="b"/>
     <feComposite in="a" in2="b" operator="arithmetic" k2="1" k3="1"/>` : ''}
   </filter>`;
+  filterId = id;
   return v;
 }
 
 const glass = document.getElementById('glass'), bd = glass.querySelector('.bd');
 // Superellipse corner as a clip path (CALayer's continuous corners).
-function clipPath(W, H){
+function clipPath(W, H, o = 0){
   const R = Math.min(state.radius, W / 2, H / 2), e = state.exp, N = 24, pts = [];
   const corner = (cx, cy, sx, sy, a0) => {
     for (let i = 0; i <= N; i++) {
@@ -180,7 +233,7 @@ function clipPath(W, H){
   };
   corner(W - R, R, 1, 1, -Math.PI / 2); corner(W - R, H - R, 1, 1, 0);
   corner(R, H - R, 1, 1, Math.PI / 2); corner(R, R, 1, 1, Math.PI);
-  return `path('M${pts.map(p => p.map(n => n.toFixed(2)).join(' ')).join('L')}Z')`;
+  return `path('M${pts.map(p => p.map(n => (n + o).toFixed(2)).join(' ')).join('L')}Z')`;
 }
 let cover = { w: 0, h: 0, x: 0, y: 0 };
 function layoutWall(){
@@ -200,22 +253,29 @@ let v = REGULAR;
 function rebuild(){
   v = buildFilter();
   const W = state.w, H = state.h;
-  glass.style.width = W + 'px'; glass.style.height = H + 'px';
-  glass.style.clipPath = clipPath(W, H);
+  glass.style.width = W + 2 * srcPad + 'px'; glass.style.height = H + 2 * srcPad + 'px';
+  glass.style.clipPath = clipPath(W, H, srcPad);
   // The glass's shadow term (tint) is a vibrant 25% copy of the backdrop under
   // a 12% black fill; a plain drop shadow is the closest CSS has.
   glass.style.boxShadow = v.shadowOpacity > 0
     ? `0 8px ${2 * sigma(0.5 * v.shadowBlur, 1)}px rgba(0,0,0,${(0.12 * v.shadowOpacity).toFixed(3)})` : 'none';
-  Object.assign(bd.style, { left: -PAD + 'px', top: -PAD + 'px', width: W + 2 * PAD + 'px', height: H + 2 * PAD + 'px' });
-  // backdrop-filter: url(#svg) isn't supported by Chrome/Safari, so the glass
-  // carries its own copy of the wallpaper (same cover geometry) under filter:.
-  bd.style.filter = 'url(#lg)';
+  // Chromium: the filter runs on whatever is behind the glass. Elsewhere
+  // backdrop-filter won't take url(), so the glass carries its own copy of the
+  // wallpaper (same cover geometry) under filter:. A fresh filter id per
+  // rebuild makes Chromium drop its cached backdrop filter.
+  const f = `url(#${filterId})`;
+  glass.style.backdropFilter = glass.style.webkitBackdropFilter = state.backdrop ? f : '';
+  bd.style.display = state.backdrop ? 'none' : '';
+  bd.style.filter = state.backdrop ? '' : f;
+  Object.assign(bd.style, { left: 0, top: 0, width: W + 2 * srcPad + 'px', height: H + 2 * srcPad + 'px' });
   place();
 }
+let pending = 0;
+const queueRebuild = () => { pending ||= requestAnimationFrame(() => { pending = 0; rebuild(); }); };
 function place(){
   const x = Math.round(pos.x - state.w / 2), y = Math.round(pos.y - state.h / 2);
-  glass.style.transform = `translate(${x}px, ${y}px)`;
-  bd.style.backgroundPosition = `${cover.x - x + PAD}px ${cover.y - y + PAD}px`;
+  glass.style.transform = `translate(${x - srcPad}px, ${y - srcPad}px)`;
+  bd.style.backgroundPosition = `${cover.x - x + srcPad}px ${cover.y - y + srcPad}px`;
 }
 
 // ---- panel ----------------------------------------------------------------
@@ -225,7 +285,7 @@ const slider = (k, label, a, b, step) => {
   const row = el('div', 'row'), top = el('div', 'top'), val = el('span', 'val'), input = el('input');
   top.append(el('span', '', label), val); row.append(top, input); pb.appendChild(row);
   Object.assign(input, { type: 'range', min: a, max: b, step });
-  input.oninput = () => { state[k] = +input.value; sync(); rebuild(); };
+  input.oninput = () => { state[k] = +input.value; sync(); queueRebuild(); };
   controls.push(() => { input.value = state[k]; val.textContent = state[k]; });
 };
 const toggle = (k, label) => {
@@ -242,15 +302,24 @@ walls.append(prev, wallBtn, next); pb.appendChild(walls);
 controls.push(() => { wallBtn.textContent = WALLS[state.wall].replace(/^\d+-/, '').replace(/-/g, ' '); });
 pb.appendChild(el('div', 'group', 'Recipe'));
 toggle('clear', 'Clear glass');
+toggle('backdrop', 'backdrop-filter (Chromium)');
+toggle('live', 'Live content behind');
 pb.appendChild(el('div', 'group', 'Shape'));
 slider('w', 'Width', 40, 1200, 1); slider('h', 'Height', 40, 900, 1);
 slider('radius', 'Corner radius', 0, 450, 1); slider('exp', 'Corner smoothing', 2, 10, 0.1);
 pb.appendChild(el('div', 'group', 'Blur'));
 slider('blurK', 'Sigma per mip texel', 0.3, 1.5, 0.05);
+slider('levels', 'Blur levels', 2, 6, 1);
+pb.appendChild(el('div', 'group', 'Dispersion (glass_foreground)'));
+toggle('ab', 'Dispersion');
+slider('abStep', 'Step', 0, 12, 0.5); slider('abHeight', 'Height', 1, 60, 0.5);
 const note = el('div', 'group'); note.style.textTransform = 'none'; note.style.letterSpacing = '0';
 note.innerHTML = 'Drag the glass. <a href="./?qc=1">WebGL port</a> for the real thing.';
 pb.appendChild(note);
-function sync(){ for (const c of controls) c(); }
+const live = document.getElementById('live');
+const LINES = ['Live DOM', 'under the glass', 'feDisplacementMap', 'in backdrop-filter', 'no wallpaper copy', 'scroll me', 'squircle 1.52866'];
+live.querySelector('.scroll').innerHTML = [...LINES, ...LINES].map((t, i) => `<p style="color:hsl(${i * 47} 90% 60%)">${t}</p>`).join('');
+function sync(){ for (const c of controls) c(); live.classList.toggle('on', state.live); }
 const panel = document.getElementById('panel');
 addEventListener('keydown', e => { if (e.key === 'h' || e.key === 'H') panel.style.display = panel.style.display === 'none' ? '' : 'none'; });
 
