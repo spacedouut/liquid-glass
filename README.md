@@ -86,8 +86,10 @@ amount 0.5, fill 0.5, shadow radius 10 at {0, -10}. "Reset" goes back to the
 playground defaults.
 
 Following the cursor uses the spring SwiftUI uses for drags (`.interactiveSpring()`,
-response 0.15 s, damping 0.85). Turn "Follow cursor" off to drag the glass
-around, or click to drop it somewhere.
+response 0.15 s, damping 0.85). It's off by default: drag the glass around, or
+click to drop it somewhere, and turn "Follow cursor" on to have it chase the
+pointer. The playground starts on clear glass with circular corners and
+"Tinted" off; "macOS" switches to the regular recipe with continuous corners.
 H hides the panel, and clicking the title collapses it. "Copy JSON" exports
 the current params.
 

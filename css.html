@@ -82,7 +82,7 @@ let srcPad = PAD;
 const CHROMIUM = navigator.userAgentData?.brands?.some(b => b.brand === 'Chromium') ?? /Chrome\/\d/.test(navigator.userAgent);
 const BACKDROP_OK = CHROMIUM && CSS.supports('backdrop-filter', 'url(#a)');
 
-const state = { w: 360, h: 220, radius: 56, exp: 5, clear: false, blurK: 0.8, levels: 4, ab: false, abStep: 3, abHeight: 20,
+const state = { w: 360, h: 220, radius: 56, exp: 2, clear: true, blurK: 0.8, levels: 4, ab: false, abStep: 3, abHeight: 20,
                 backdrop: BACKDROP_OK, live: false, wall: 10, x: innerWidth / 2, y: innerHeight / 2 };
 for (const [k, v] of new URLSearchParams(location.search))
   if (k in state) state[k] = typeof state[k] === 'boolean' ? v === 'true' || v === '1' : +v;

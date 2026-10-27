@@ -403,8 +403,8 @@ function loadWall(i){
 const DEFAULTS = {
   // exp 3 + radius*1.375 is the measured fit to CASDFElementLayer's continuous
   // corner; the slider explores around it (5+ gets squarer than real glass).
-  w: 360, h: 220, radius: 56, squircle: true, exp: 3,
-  follow: true, followResponse: 0.15, followDamping: 0.85,
+  w: 360, h: 220, radius: 56, squircle: false, exp: 3,
+  follow: false, followResponse: 0.15, followDamping: 0.85,
   qAngle: 0, qDark: false, qRimHl: true, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
 };
 // glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6), read live
@@ -461,7 +461,7 @@ const QC_FIXED = {
   sdrDist: [-2, -1], sdrWhite: 0.97, sdrShadowOpacity: 0.24,
 };
 const applyRecipe = st => Object.assign(st, qcRecipe(Math.min(st.w, st.h), st.qClear, st.qDark, st.qActive, st.qTinted));
-Object.assign(DEFAULTS, { qSized: true, qTinted: true }, qcRecipe(Math.min(DEFAULTS.w, DEFAULTS.h), false, false, true, true));
+Object.assign(DEFAULTS, { qSized: true, qTinted: false }, qcRecipe(Math.min(DEFAULTS.w, DEFAULTS.h), true, false, true, false));
 // Values recovered from QuartzCore (+defaultValues / GlassBackgroundFilter::render):
 // displacement height 20 + curvature 1, refraction height 30, highlight
 // angle pi/2 spread pi amount 0.5, key/fill amounts 0.5, shadow radius 10 offset {0,-10}.
