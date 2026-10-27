@@ -43,14 +43,24 @@ void main(){
 }`;
 
 // Rounded rect in pt (negative inside); uExp 2 = circular corners, >2 = squircle.
+// With a second glass (uMerge >= 0) the two fields are joined by a polynomial
+// smooth min over uMerge pt, the way glass shapes in a GlassEffectContainer
+// melt together, and every effect downstream just sees one shape.
 const SDF_GLSL = `
-uniform vec2  uHalf;
-uniform float uRadius, uExp;
-float sdf(vec2 q){
-  vec2 w = abs(q) - uHalf + uRadius;
+uniform vec2  uHalf, uHalf2, uOff2;
+uniform float uRadius, uRadius2, uExp, uMerge;
+float box(vec2 q, vec2 hf, float r){
+  vec2 w = abs(q) - hf + r;
   vec2 m = max(w, 0.0);
   float c = uExp == 2.0 ? length(m) : pow(pow(m.x, uExp) + pow(m.y, uExp), 1.0 / uExp);
-  return c + min(max(w.x, w.y), 0.0) - uRadius;
+  return c + min(max(w.x, w.y), 0.0) - r;
+}
+float sdf(vec2 q){
+  float a = box(q, uHalf, uRadius);
+  if (uMerge < 0.0) return a;
+  float b = box(q - uOff2, uHalf2, uRadius2), k = max(uMerge, 1e-3);
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
 }`;
 
 // Faithful mode: glass_background_lpf + glass_foreground_lpf, transcribed from
@@ -405,6 +415,7 @@ const DEFAULTS = {
   // corner; the slider explores around it (5+ gets squarer than real glass).
   w: 360, h: 220, radius: 56, squircle: false, exp: 3,
   follow: false, followResponse: 0.15, followDamping: 0.85,
+  stretch: true, stretchAmount: 0.15, merge: false, mergeK: 40, w2: 160, h2: 160,
   qAngle: 0, qDark: false, qRimHl: true, qFgOn: false, qFgStep: 3, qFgHeight: 20, qFgStrength: 1,
 };
 // glassBackground inputs AppKit sets on NSGlassEffectView (macOS 26.6), read live
@@ -486,6 +497,13 @@ const SCHEMA = [
   ['follow', 'Follow cursor', 'toggle'],
   ['followResponse', 'Follow response', 0.05, 1, 0.01, () => state.follow],
   ['followDamping', 'Follow damping', 0.2, 1, 0.01, () => state.follow],
+  ['stretch', 'Stretch', 'toggle'],
+  ['stretchAmount', 'Stretch amount', 0, 1, 0.01, () => state.stretch],
+  ['Merge'],
+  ['merge', 'Second glass', 'toggle'],
+  ['mergeK', 'Merge spacing', 0, 160, 1, () => state.merge],
+  ['w2', 'Width', 40, 600, 1, () => state.merge],
+  ['h2', 'Height', 40, 600, 1, () => state.merge],
   ['Variant'],
   ['qClear', 'Clear glass', 'toggle'],
   ['qDark', 'Dark mode', 'toggle'],
@@ -610,16 +628,22 @@ addEventListener('keydown', e => {
 });
 
 // ---- pointer -------------------------------------------------------------------
-let drag = null;
+let drag = null, jumped = true;
+const posB = { x: 0, y: 0 };   // second glass, CSS px
 canvas.addEventListener('pointermove', e => {
-  if (state.follow) { target.x = e.clientX; target.y = e.clientY; }
+  if (drag?.b) { posB.x = e.clientX - drag.x; posB.y = e.clientY - drag.y; }
+  else if (state.follow) { target.x = e.clientX; target.y = e.clientY; }
   else if (drag) { target.x = pos.x = e.clientX - drag.x; target.y = pos.y = e.clientY - drag.y; }
 });
 canvas.addEventListener('pointerdown', e => {
-  if (state.follow) { target.x = e.clientX; target.y = e.clientY; return; }
+  const onB = state.merge && Math.abs(e.clientX - posB.x) <= state.w2 / 2 && Math.abs(e.clientY - posB.y) <= state.h2 / 2;
+  if (state.follow && !onB) { target.x = e.clientX; target.y = e.clientY; return; }
   const inside = Math.abs(e.clientX - pos.x) <= state.w / 2 && Math.abs(e.clientY - pos.y) <= state.h / 2;
-  if (!inside) { target.x = pos.x = e.clientX; target.y = pos.y = e.clientY; }
-  drag = { x: e.clientX - pos.x, y: e.clientY - pos.y };
+  if (onB && !inside) drag = { b: true, x: e.clientX - posB.x, y: e.clientY - posB.y };
+  else {
+    if (!inside) { target.x = pos.x = e.clientX; target.y = pos.y = e.clientY; jumped = true; }
+    drag = { x: e.clientX - pos.x, y: e.clientY - pos.y };
+  }
   canvas.setPointerCapture(e.pointerId);
   canvas.classList.add('dragging');
 });
@@ -634,6 +658,23 @@ function resize(){
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
 }
 pos.x = target.x = innerWidth < 640 ? innerWidth / 2 : innerWidth / 2 - 130; pos.y = target.y = innerHeight / 2;
+posB.x = Math.min(pos.x + 340, innerWidth - 100); posB.y = pos.y + 60;
+
+// Stretch: the glass's measured velocity (spring follow or drag alike) sets a
+// target log-stretch a, x scaled by e^a and y by e^-a so the area holds. It
+// saturates at +-0.4 and reaches it through a bouncy spring (response 0.4 s,
+// damping 0.5), so the glass jiggles back into shape when it stops.
+const mvel = { x: 0, y: 0 }, lastPos = { x: 0, y: 0 };
+let sq = 0, sqv = 0;
+function stretchStep(dt){
+  if (jumped || dt <= 0) { lastPos.x = pos.x; lastPos.y = pos.y; jumped = false; if (dt <= 0) return; }
+  const lp = 1 - Math.exp(-dt / 0.04);
+  mvel.x += ((pos.x - lastPos.x) / dt - mvel.x) * lp; mvel.y += ((pos.y - lastPos.y) / dt - mvel.y) * lp;
+  lastPos.x = pos.x; lastPos.y = pos.y;
+  const goal = state.stretch ? 0.4 * Math.tanh(state.stretchAmount * (Math.abs(mvel.x) - Math.abs(mvel.y)) / 400) : 0;
+  const w0 = 2 * Math.PI / 0.4, k = w0 * w0, c = 2 * 0.5 * w0;
+  for (let n = Math.ceil(dt * 480), h = dt / n; n > 0; n--) { sqv += (k * (goal - sq) - c * sqv) * h; sq += sqv * h; }
+}
 
 
 // ---- frame ---------------------------------------------------------------------
@@ -651,6 +692,7 @@ function frame(now){
       pos.x += vel.x * h; pos.y += vel.y * h;
     }
   } else vel.x = vel.y = 0;
+  stretchStep(dt);
   const ca = W / H;
   const cover = ca > imgAspect ? [1, imgAspect / ca] : [ca / imgAspect, 1];
 
@@ -679,12 +721,16 @@ function drawQC(W, H, cover){
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, back.t);
   gl.uniform1i(u.srcTex, 0);
   f('uRes', W, H); f('uDpr', dpr); f('uCenter', pos.x * dpr, H - pos.y * dpr);
-  const hw = state.w / 2, hh = state.h / 2;
+  const hw = state.w / 2 * Math.exp(sq), hh = state.h / 2 * Math.exp(-sq);
   // CASDFElementLayer's continuous corner isn't our superellipse: r56
   // continuous measures as radius*1.375 at exp 3 (0.3pt RMS fit).
   f('uHalf', hw, hh);
   f('uRadius', Math.min(state.radius * (state.squircle ? 1.375 : 1), hw, hh));
   f('uExp', state.squircle ? state.exp : 2);
+  const hw2 = state.w2 / 2, hh2 = state.h2 / 2;   // a pill: radius = half the short side
+  f('uHalf2', hw2, hh2); f('uRadius2', Math.min(hw2, hh2));
+  f('uOff2', posB.x - pos.x, pos.y - posB.y);    // pt, y up like q
+  f('uMerge', state.merge ? state.mergeK : -1);
   f('uShadow', 0);   // the glass's own shadow term (tint) draws it
   f('globalAlpha', 1);
   gl.uniform1i(u.uFgOn, state.qFgOn ? 1 : 0);

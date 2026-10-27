@@ -90,6 +90,15 @@ response 0.15 s, damping 0.85). It's off by default: drag the glass around, or
 click to drop it somewhere, and turn "Follow cursor" on to have it chase the
 pointer. The playground starts on clear glass with circular corners and
 "Tinted" off; "macOS" switches to the regular recipe with continuous corners.
+"Stretch" squashes the glass along its motion, spring or drag alike: the
+measured velocity sets a log-stretch (x by e^a, y by e^-a, so the area holds)
+that saturates at 0.4 and is chased by a bouncy spring (response 0.4 s,
+damping 0.5), so the glass jiggles back into shape when it stops. It works
+per axis, so diagonal motion stays square. "Second glass" adds a draggable
+pill and joins the two SDFs with a polynomial smooth min over "Merge
+spacing" pt, the way shapes in a SwiftUI `GlassEffectContainer` melt
+together; refraction, blur, rim and highlight all run on the merged field.
+
 H hides the panel, and clicking the title collapses it. "Copy JSON" exports
 the current params.
 
