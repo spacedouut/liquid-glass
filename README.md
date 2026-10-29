@@ -56,14 +56,29 @@ things that turned out different from the old guesses:
 AppKit doesn't change the math between any of these, only the inputs.
 
 `css.html` is the same recipe done with CSS and SVG filters, no WebGL: one
-`filter: url(#lg)` chain doing blur, `feDisplacementMap` for the refraction
-(map baked from the same SDF/`edgeOffset`), the face matrix as
-`feColorMatrix`, and the luma-gated bleed as gamma + arithmetic composites.
-It gets surprisingly close. What it can't do: a per-pixel mip lod (it blends
-two gaussians by a mask instead), the 8-bit displacement map steps a little
-at the rim, the vibrant shadow is a plain `box-shadow`, and since browsers
-don't take SVG filters in `backdrop-filter`, the glass carries its own copy
-of the wallpaper, so it only works over a static background.
+SVG filter chain doing blur, `feDisplacementMap` for the refraction (map baked
+from the same SDF/`edgeOffset`), the face matrix as `feColorMatrix`, and the
+luma-gated bleed as gamma + arithmetic composites.
+
+- Chromium runs SVG filter references in `backdrop-filter`, `feImage` and
+  `feDisplacementMap` included, so there the glass is a real
+  `backdrop-filter: url(#lg)` over live page content ("Live content behind"
+  shows it off). Firefox and Safari fall back to `filter:` on a copy of the
+  wallpaper, which only works over a static background. Chromium clamps a
+  backdrop-filter's input to the element box, so the element is padded by 3
+  sigma of the bleed blur and clipped to the shape; the copy uses the same
+  padding, which also fixes the bleed running off the old 64px pad
+- the mip lod is approximated by N gaussians spaced evenly in lod ("Blur
+  levels", default 4), weighted by tents of the baked knot mask (a linear
+  `feFuncR` table with a single 1 is a tent)
+- the maps are baked at device resolution with ordered dithering, which keeps
+  the steep part of the quarter-circle profile at the rim smooth on HiDPI
+- "Dispersion" adds `glass_foreground`'s chromatic split: red displaced a step
+  out along the SDF gradient, blue a step in, green straight, over a rim band.
+  Off by default, like on macOS
+
+What it still can't do: a true per-pixel mip lod, and the vibrant shadow is
+a plain `box-shadow`.
 
 All lengths are in points. "macOS" applies the recovered values: displacement
 height 20, curvature 1, refraction 30, highlight angle 90° / spread 180° /
@@ -71,8 +86,10 @@ amount 0.5, fill 0.5, shadow radius 10 at {0, -10}. "Reset" goes back to the
 playground defaults.
 
 Following the cursor uses the spring SwiftUI uses for drags (`.interactiveSpring()`,
-response 0.15 s, damping 0.85). Turn "Follow cursor" off to drag the glass
-around, or click to drop it somewhere.
+response 0.15 s, damping 0.85). It's off by default: drag the glass around, or
+click to drop it somewhere, and turn "Follow cursor" on to have it chase the
+pointer. The playground starts on clear glass with circular corners and
+"Tinted" off; "macOS" switches to the regular recipe with continuous corners.
 H hides the panel, and clicking the title collapses it. "Copy JSON" exports
 the current params.
 
